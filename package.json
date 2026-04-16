@@ -1,0 +1,20 @@
+{
+  "name": "syncai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SyncAI / 灵悉 AI monorepo",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "workspaces": [
+    "server",
+    "web",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev --workspace @syncai/server",
+    "dev:web": "npm run dev --workspace @syncai/web",
+    "build": "npm run build --workspace @syncai/shared && npm run build --workspace @syncai/server && npm run build --workspace @syncai/web",
+    "typecheck": "npm run build --workspace @syncai/shared && npm run typecheck --workspace @syncai/server && npm run typecheck --workspace @syncai/web"
+  }
+}

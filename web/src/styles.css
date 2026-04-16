@@ -1,0 +1,147 @@
+:root {
+  color-scheme: light;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #1c1b18;
+  background:
+    radial-gradient(circle at top left, rgba(245, 162, 86, 0.3), transparent 35%),
+    radial-gradient(circle at top right, rgba(29, 155, 209, 0.2), transparent 30%),
+    linear-gradient(180deg, #f8f3ea 0%, #f1ece2 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.page-shell {
+  display: grid;
+  gap: 24px;
+  width: min(1100px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 48px 0 72px;
+}
+
+.hero,
+.panel {
+  backdrop-filter: blur(14px);
+  background: rgba(255, 252, 247, 0.8);
+  border: 1px solid rgba(28, 27, 24, 0.1);
+  border-radius: 28px;
+  box-shadow: 0 20px 80px rgba(79, 55, 24, 0.12);
+  padding: 28px;
+}
+
+.eyebrow {
+  margin: 0 0 12px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #8d4f1e;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+h1 {
+  max-width: 12ch;
+  font-size: clamp(2.4rem, 5vw, 4.8rem);
+  line-height: 0.95;
+}
+
+.lead {
+  max-width: 64ch;
+  margin-top: 20px;
+  font-size: 1.05rem;
+  line-height: 1.7;
+  color: rgba(28, 27, 24, 0.78);
+}
+
+.hero-grid,
+.entry-grid {
+  display: grid;
+  gap: 16px;
+  margin-top: 28px;
+}
+
+.hero-grid {
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
+.hero-grid article,
+.entry-card {
+  padding: 18px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(28, 27, 24, 0.08);
+}
+
+.hero-grid span,
+.entry-card .index {
+  display: inline-block;
+  color: rgba(28, 27, 24, 0.58);
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.hero-grid strong {
+  display: block;
+  margin-top: 10px;
+  font-size: 1.1rem;
+}
+
+.panel-header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.panel-header h2 {
+  font-size: clamp(1.8rem, 3vw, 2.8rem);
+}
+
+.entry-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.entry-card h3 {
+  margin-top: 12px;
+  font-size: 1.25rem;
+}
+
+.entry-card p {
+  margin-top: 10px;
+  color: rgba(28, 27, 24, 0.75);
+  line-height: 1.65;
+}
+
+@media (max-width: 640px) {
+  .page-shell {
+    width: min(100% - 20px, 1100px);
+    padding-top: 24px;
+  }
+
+  .hero,
+  .panel {
+    padding: 20px;
+    border-radius: 22px;
+  }
+
+  h1 {
+    max-width: none;
+    font-size: 2.5rem;
+  }
+}
