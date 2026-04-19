@@ -4,7 +4,9 @@ import test from "node:test";
 import { runCommand } from "../helpers/process.mjs";
 
 test("env smoke exposes the documented startup and test entrypoints", () => {
-  const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
+  const packageJson = JSON.parse(
+    readFileSync("package.json", "utf8").replace(/^\uFEFF/, ""),
+  );
 
   for (const scriptName of [
     "db:up",

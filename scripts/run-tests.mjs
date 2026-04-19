@@ -87,16 +87,8 @@ function runCommand(command, args, label) {
     const child = spawn(command, args, {
       cwd: repoRoot,
       env: process.env,
-      shell: process.platform === "win32",
-      stdio: ["inherit", "pipe", "pipe"],
-    });
-
-    child.stdout.on("data", (chunk) => {
-      process.stdout.write(`[${label}] ${chunk}`);
-    });
-
-    child.stderr.on("data", (chunk) => {
-      process.stderr.write(`[${label}] ${chunk}`);
+      shell: false,
+      stdio: "inherit",
     });
 
     child.on("error", rejectPromise);
