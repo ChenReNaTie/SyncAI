@@ -1,20 +1,36 @@
-{
-  "name": "syncai",
-  "version": "0.1.0",
-  "private": true,
-  "description": "SyncAI / 灵悉 AI monorepo",
-  "engines": {
-    "node": ">=24.0.0"
-  },
-  "workspaces": [
-    "server",
-    "web",
-    "packages/*"
-  ],
-  "scripts": {
-    "dev:server": "npm run dev --workspace @syncai/server",
-    "dev:web": "npm run dev --workspace @syncai/web",
-    "build": "npm run build --workspace @syncai/shared && npm run build --workspace @syncai/server && npm run build --workspace @syncai/web",
-    "typecheck": "npm run build --workspace @syncai/shared && npm run typecheck --workspace @syncai/server && npm run typecheck --workspace @syncai/web"
-  }
+﻿{
+    "name":  "syncai",
+    "version":  "0.1.0",
+    "private":  true,
+    "description":  "SyncAI / 鐏垫倝 AI monorepo",
+    "engines":  {
+                    "node":  "\u003e=24.0.0"
+                },
+    "workspaces":  [
+                       "server",
+                       "web",
+                       "packages/*"
+                   ],
+    "scripts":  {
+                    "dev":  "node scripts/dev.mjs",
+                    "dev:server":  "npm run dev --workspace @syncai/server",
+                    "dev:web":  "npm run dev --workspace @syncai/web",
+                    "db:up":  "docker compose up -d postgres redis",
+                    "db:down":  "docker compose down",
+                    "db:migrate":  "npm run db:migrate --workspace @syncai/server",
+                    "build":  "npm run build --workspace @syncai/shared \u0026\u0026 npm run build --workspace @syncai/server \u0026\u0026 npm run build --workspace @syncai/web",
+                    "typecheck":  "npm run build --workspace @syncai/shared \u0026\u0026 npm run typecheck --workspace @syncai/server \u0026\u0026 npm run typecheck --workspace @syncai/web",
+                    "test":  "node scripts/run-tests.mjs regression_commit_gate",
+                    "test:shared":  "npm run test --workspace @syncai/shared",
+                    "test:server":  "npm run test --workspace @syncai/server",
+                    "test:unit":  "node scripts/run-tests.mjs unit",
+                    "test:contracts":  "node scripts/run-tests.mjs contracts",
+                    "test:integration":  "node scripts/run-tests.mjs integration",
+                    "test:e2e":  "node scripts/run-tests.mjs e2e",
+                    "test:smoke":  "node scripts/run-tests.mjs smoke",
+                    "test:smoke:env":  "node scripts/run-tests.mjs smoke:env",
+                    "test:smoke:dev":  "node scripts/run-tests.mjs smoke:dev",
+                    "test:regression:commit":  "node scripts/run-tests.mjs regression_commit_gate",
+                    "test:regression:pre-release":  "node scripts/run-tests.mjs regression_pre_release"
+                }
 }
