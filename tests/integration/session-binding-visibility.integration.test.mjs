@@ -57,7 +57,7 @@ test("integration_session_binding_visibility accepts shared and private sessions
     );
 
     assert.deepEqual(
-      sessions.rows.map((row) => row.visibility),
+      sessions.rows.map((row) => row.visibility).sort(),
       ["private", "shared"],
     );
 

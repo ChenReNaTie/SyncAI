@@ -8,6 +8,36 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..", "..");
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 
+function quoteWindowsArg(arg) {
+  const text = String(arg);
+  if (!/[\s"]/u.test(text)) {
+    return text;
+  }
+
+  const escaped = text.replace(/"/g, '\\"');
+  return `"${escaped}"`;
+}
+
+function quoteWindowsCommand(command) {
+  return /[\\/\s:]/.test(command) ? quoteWindowsArg(command) : command;
+}
+
+function resolveSpawnTarget(command, args) {
+  if (process.platform === "win32" && /\.cmd$/i.test(command)) {
+    return {
+      command: "cmd.exe",
+      args: [
+        "/d",
+        "/s",
+        "/c",
+        [quoteWindowsCommand(command), ...args.map(quoteWindowsArg)].join(" "),
+      ],
+    };
+  }
+
+  return { command, args };
+}
+
 function createLogBuffer() {
   let buffer = "";
 
@@ -45,10 +75,11 @@ async function killTree(child) {
 
 export async function startDevStack() {
   const logs = createLogBuffer();
-  const child = spawn(npmCommand, ["run", "dev"], {
+  const target = resolveSpawnTarget(npmCommand, ["run", "dev"]);
+  const child = spawn(target.command, target.args, {
     cwd: repoRoot,
     env: process.env,
-    shell: process.platform === "win32",
+    shell: false,
     stdio: ["ignore", "pipe", "pipe"],
   });
 

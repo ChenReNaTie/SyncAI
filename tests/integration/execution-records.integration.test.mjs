@@ -22,6 +22,7 @@ test("integration_execution_records indexes only member messages and final agent
       content: "queue visibility problem",
       processingStatus: "completed",
       sequenceNo: 1,
+      clientMessageId: "member-001",
     });
 
     await insertMessage(client, {
@@ -31,6 +32,7 @@ test("integration_execution_records indexes only member messages and final agent
       processingStatus: "running",
       isFinalReply: false,
       sequenceNo: 2,
+      clientMessageId: "agent-001",
     });
 
     await insertMessage(client, {
@@ -40,6 +42,7 @@ test("integration_execution_records indexes only member messages and final agent
       processingStatus: "completed",
       isFinalReply: true,
       sequenceNo: 3,
+      clientMessageId: "agent-002",
     });
 
     const result = await client.query(

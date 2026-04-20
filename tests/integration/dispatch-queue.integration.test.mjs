@@ -43,6 +43,8 @@ test("integration_dispatch_queue enforces client_message_id uniqueness per sessi
       clientMessageId: "msg-001",
     });
 
+    await client.query("SAVEPOINT duplicate_message");
+
     await assert.rejects(
       insertMessage(client, {
         sessionId: primaryContext.sessionId,
@@ -55,6 +57,9 @@ test("integration_dispatch_queue enforces client_message_id uniqueness per sessi
       }),
       (error) => error?.code === "23505",
     );
+
+    await client.query("ROLLBACK TO SAVEPOINT duplicate_message");
+    await client.query("RELEASE SAVEPOINT duplicate_message");
 
     const duplicateAcrossSessions = await insertMessage(client, {
       sessionId: secondaryContext.sessionId,

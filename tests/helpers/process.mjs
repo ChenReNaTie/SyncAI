@@ -1,5 +1,35 @@
 import { spawn } from "node:child_process";
 
+function quoteWindowsArg(arg) {
+  const text = String(arg);
+  if (!/[\s"]/u.test(text)) {
+    return text;
+  }
+
+  const escaped = text.replace(/"/g, '\\"');
+  return `"${escaped}"`;
+}
+
+function quoteWindowsCommand(command) {
+  return /[\\/\s:]/.test(command) ? quoteWindowsArg(command) : command;
+}
+
+function resolveSpawnTarget(command, args) {
+  if (process.platform === "win32" && /\.cmd$/i.test(command)) {
+    return {
+      command: "cmd.exe",
+      args: [
+        "/d",
+        "/s",
+        "/c",
+        [quoteWindowsCommand(command), ...args.map(quoteWindowsArg)].join(" "),
+      ],
+    };
+  }
+
+  return { command, args };
+}
+
 export function runCommand(command, args, options = {}) {
   const {
     cwd,
@@ -9,7 +39,8 @@ export function runCommand(command, args, options = {}) {
   } = options;
 
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const target = resolveSpawnTarget(command, args);
+    const child = spawn(target.command, target.args, {
       cwd,
       env,
       shell: false,
