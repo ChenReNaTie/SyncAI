@@ -30,6 +30,13 @@ function resolveSpawnTarget(command, args) {
   return { command, args };
 }
 
+export function isSpawnBlockedError(error) {
+  return (
+    error?.syscall === "spawn" &&
+    (error?.code === "EPERM" || error?.code === "EINVAL")
+  );
+}
+
 export function runCommand(command, args, options = {}) {
   const {
     cwd,

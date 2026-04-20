@@ -2,6 +2,7 @@ import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { loadEnv } from "./config/env.js";
 import { registerHealthRoutes } from "./routes/health.js";
+import { registerMvpPlaceholderRoutes } from "./routes/mvp-placeholders.js";
 
 export async function buildApp() {
   const env = loadEnv();
@@ -23,6 +24,7 @@ export async function buildApp() {
 
   await app.register(async (api) => {
     await registerHealthRoutes(api);
+    await registerMvpPlaceholderRoutes(api);
   }, { prefix: "/api/v1" });
 
   return { app, env };
@@ -37,4 +39,3 @@ declare module "fastify" {
     };
   }
 }
-

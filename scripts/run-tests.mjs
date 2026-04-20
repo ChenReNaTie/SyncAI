@@ -163,7 +163,12 @@ async function runGroup(groupId) {
 
   await runCommand(
     process.execPath,
-    ["--test", "--test-reporter=spec", ...files],
+    [
+      "--test",
+      "--test-isolation=none",
+      "--test-reporter=spec",
+      ...files,
+    ],
     groupId,
   );
 }
