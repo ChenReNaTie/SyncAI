@@ -74,3 +74,40 @@ test("integration_dispatch_queue enforces client_message_id uniqueness per sessi
     assert.equal(duplicateAcrossSessions.client_message_id, "msg-001");
   });
 });
+
+test("integration_dispatch_queue allows multiple member and agent messages without client_message_id", async () => {
+  await withRollbackTransaction(async (client) => {
+    const context = await seedSessionContext(client);
+
+    const firstMember = await insertMessage(client, {
+      sessionId: context.sessionId,
+      senderType: "member",
+      senderUserId: context.ownerId,
+      content: "First member message without client id",
+      processingStatus: "completed",
+      sequenceNo: 1,
+    });
+
+    const secondMember = await insertMessage(client, {
+      sessionId: context.sessionId,
+      senderType: "member",
+      senderUserId: context.ownerId,
+      content: "Second member message without client id",
+      processingStatus: "completed",
+      sequenceNo: 2,
+    });
+
+    const agentReply = await insertMessage(client, {
+      sessionId: context.sessionId,
+      senderType: "agent",
+      content: "Final reply without client id",
+      processingStatus: "completed",
+      isFinalReply: true,
+      sequenceNo: 3,
+    });
+
+    assert.equal(firstMember.client_message_id, null);
+    assert.equal(secondMember.client_message_id, null);
+    assert.equal(agentReply.client_message_id, null);
+  });
+});
