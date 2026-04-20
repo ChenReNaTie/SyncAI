@@ -54,6 +54,10 @@ const groupDefinitions = {
     entries: ["tests/contracts"],
   },
   integration: {
+    setup: [
+      ["run", "build", "--workspace", "@syncai/shared"],
+      ["run", "build", "--workspace", "@syncai/server"],
+    ],
     entries: ["tests/integration"],
   },
   e2e: {

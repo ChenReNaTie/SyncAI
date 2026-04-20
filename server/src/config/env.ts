@@ -9,6 +9,7 @@ const envSchema = z.object({
     .string()
     .default("postgres://syncai:syncai@127.0.0.1:5432/syncai"),
   SYNCAI_REDIS_URL: z.string().default("redis://127.0.0.1:6379"),
+  SYNCAI_MOCK_AGENT_LATENCY_MS: z.coerce.number().int().min(0).default(25),
 });
 
 export interface AppEnv {
@@ -18,6 +19,7 @@ export interface AppEnv {
   port: number;
   databaseUrl: string;
   redisUrl: string;
+  mockAgentLatencyMs: number;
 }
 
 export function loadEnv(rawEnv: NodeJS.ProcessEnv = process.env): AppEnv {
@@ -30,5 +32,6 @@ export function loadEnv(rawEnv: NodeJS.ProcessEnv = process.env): AppEnv {
     port: parsed.SYNCAI_SERVER_PORT,
     databaseUrl: parsed.SYNCAI_DATABASE_URL,
     redisUrl: parsed.SYNCAI_REDIS_URL,
+    mockAgentLatencyMs: parsed.SYNCAI_MOCK_AGENT_LATENCY_MS,
   };
 }

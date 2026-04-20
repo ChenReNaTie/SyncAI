@@ -3,6 +3,10 @@ import Fastify from "fastify";
 import type { Pool } from "pg";
 import { loadEnv } from "./config/env.js";
 import { createDatabasePool } from "./lib/database.js";
+import {
+  createWorkspaceRuntime,
+  type WorkspaceRuntime,
+} from "./lib/workspace-runtime.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerWorkspaceRoutes } from "./routes/workspace.js";
 
@@ -14,6 +18,11 @@ export async function buildApp() {
       level: env.nodeEnv === "development" ? "info" : "warn",
     },
   });
+  const workspaceRuntime = createWorkspaceRuntime({
+    db,
+    logger: app.log,
+    mockLatencyMs: env.mockAgentLatencyMs,
+  });
 
   app.decorate("config", {
     appName: env.appName,
@@ -21,12 +30,14 @@ export async function buildApp() {
     redisUrl: env.redisUrl,
   });
   app.decorate("db", db);
+  app.decorate("workspaceRuntime", workspaceRuntime);
 
   await app.register(cors, {
     origin: true,
   });
 
   app.addHook("onClose", async () => {
+    await workspaceRuntime.close();
     await db.end();
   });
 
@@ -46,5 +57,6 @@ declare module "fastify" {
       redisUrl: string;
     };
     db: Pool;
+    workspaceRuntime: WorkspaceRuntime;
   }
 }

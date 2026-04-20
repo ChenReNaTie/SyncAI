@@ -6,6 +6,10 @@ import {
   todoStatusValues,
 } from "@syncai/shared";
 import { z } from "zod";
+import {
+  appendMessageQueuedEvent,
+  appendStatusChangedEvent,
+} from "../lib/session-events.js";
 
 const sessionCreateSchema = z.object({
   title: z.string().trim().min(1).max(200),
@@ -291,8 +295,16 @@ export async function registerWorkspaceRoutes(
       return reply.code(409).send({ code: "NODE_UNAVAILABLE" });
     }
 
+    const sessionId = randomUUID();
+    const binding = await app.workspaceRuntime.ensureSessionBinding({
+      teamId: String(project.team_id),
+      sessionId,
+      nodeId: String(project.online_node_id),
+    });
+
     const result = await app.db.query(
       `INSERT INTO sessions (
+         id,
          project_id,
          creator_id,
          title,
@@ -301,7 +313,7 @@ export async function registerWorkspaceRoutes(
          bound_agent_node_id,
          bound_agent_session_ref
        )
-       VALUES ($1, $2, $3, $4, 'idle', $5, $6)
+       VALUES ($1, $2, $3, $4, $5, 'idle', $6, $7)
        RETURNING
          id,
          project_id,
@@ -316,12 +328,13 @@ export async function registerWorkspaceRoutes(
          created_at,
          updated_at`,
       [
+        sessionId,
         params.data.projectId,
         project.created_by,
         body.data.title,
         body.data.visibility,
         project.online_node_id,
-        `codex-${randomUUID()}`,
+        binding.agentSessionRef,
       ],
     );
 
@@ -676,10 +689,10 @@ export async function registerWorkspaceRoutes(
 
       const pendingCount = Number(pendingResult.rows[0]?.pending_count ?? 0);
       const nextSequence = Number(pendingResult.rows[0]?.last_sequence ?? 0) + 1;
+      const hasPendingMessages = pendingCount > 0;
       const nextRuntimeStatus =
         session.runtime_status === "running" ? "running" : "queued";
-      const processingStatus =
-        session.runtime_status === "running" ? "queued" : "accepted";
+      const processingStatus = hasPendingMessages ? "queued" : "accepted";
 
       const messageResult = await client.query(
         `INSERT INTO messages (
@@ -725,7 +738,25 @@ export async function registerWorkspaceRoutes(
         [params.data.sessionId, nextRuntimeStatus],
       );
 
+      if (nextRuntimeStatus !== session.runtime_status) {
+        await appendStatusChangedEvent(client, {
+          sessionId: params.data.sessionId,
+          relatedMessageId: String(messageResult.rows[0].id),
+          from: session.runtime_status,
+          to: nextRuntimeStatus,
+        });
+      }
+
+      if (processingStatus === "queued") {
+        await appendMessageQueuedEvent(client, {
+          sessionId: params.data.sessionId,
+          messageId: String(messageResult.rows[0].id),
+          queuePosition: pendingCount + 1,
+        });
+      }
+
       await client.query("COMMIT");
+      app.workspaceRuntime.scheduleSession(params.data.sessionId);
 
       return reply.code(201).send({
         data: {
