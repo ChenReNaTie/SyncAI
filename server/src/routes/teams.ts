@@ -26,12 +26,18 @@ const teamMemberParamsSchema = z.object({
 const projectCreateSchema = z.object({
   name: z.string().trim().min(1).max(100),
   description: z.string().trim().max(2000).optional(),
+  working_directory: z.string().trim().max(1000).optional(),
 });
 
-const teamMemberCreateSchema = z.object({
-  user_id: z.string().uuid(),
-  role: z.enum(["admin", "member"]),
-});
+const teamMemberCreateSchema = z
+  .object({
+    user_id: z.string().uuid().optional(),
+    email: z.string().email().optional(),
+    role: z.enum(["admin", "member"]),
+  })
+  .refine((data) => data.user_id || data.email, {
+    message: "请提供 user_id 或 email 至少一项",
+  });
 
 const teamMemberPatchSchema = z.object({
   role: z.enum(["admin", "member"]),
@@ -151,6 +157,7 @@ function serializeProject(row: Record<string, unknown>) {
     team_id: row.team_id,
     name: row.name,
     description: row.description ?? null,
+    working_directory: row.working_directory ?? null,
     created_by: row.created_by,
     archived_at: asIso(row.archived_at),
     created_at: asIso(row.created_at),
@@ -253,6 +260,7 @@ async function loadProjectForActor(
        p.team_id,
        p.name,
        p.description,
+       p.working_directory,
        p.created_by,
        p.archived_at,
        p.created_at,
@@ -455,9 +463,23 @@ export async function registerTeamRoutes(
       return reply.code(403).send({ code: "TEAM_FORBIDDEN" });
     }
 
-    const targetUser = await loadActiveUser(app, body.data.user_id);
-    if (!targetUser) {
-      return reply.code(404).send({ code: "USER_NOT_FOUND" });
+    // Resolve the target user_id (from email or direct user_id)
+    let resolvedUserId: string;
+    if (body.data.email) {
+      const userByEmail = await app.db.query(
+        `SELECT id FROM users WHERE email = $1 AND status = 'active'`,
+        [body.data.email],
+      );
+      if (!userByEmail.rows[0]) {
+        return reply.code(404).send({ code: "USER_NOT_FOUND" });
+      }
+      resolvedUserId = userByEmail.rows[0].id;
+    } else {
+      const targetUser = await loadActiveUser(app, body.data.user_id!);
+      if (!targetUser) {
+        return reply.code(404).send({ code: "USER_NOT_FOUND" });
+      }
+      resolvedUserId = body.data.user_id!;
     }
 
     try {
@@ -467,7 +489,7 @@ export async function registerTeamRoutes(
          RETURNING team_id, user_id, role, joined_at, invited_by`,
         [
           params.data.teamId,
-          body.data.user_id,
+          resolvedUserId,
           body.data.role,
           access.actorUserId,
         ],
@@ -671,13 +693,14 @@ export async function registerTeamRoutes(
     }
 
     const result = await app.db.query(
-      `INSERT INTO projects (team_id, name, description, created_by)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO projects (team_id, name, description, working_directory, created_by)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING
          id,
          team_id,
          name,
          description,
+         working_directory,
          created_by,
          archived_at,
          created_at,
@@ -686,6 +709,7 @@ export async function registerTeamRoutes(
         params.data.teamId,
         body.data.name,
         body.data.description ?? null,
+        body.data.working_directory ?? null,
         access.actorUserId,
       ],
     );
@@ -717,6 +741,7 @@ export async function registerTeamRoutes(
          team_id,
          name,
          description,
+         working_directory,
          created_by,
          archived_at,
          created_at,
@@ -767,6 +792,7 @@ export async function registerTeamRoutes(
          team_id,
          name,
          description,
+         working_directory,
          created_by,
          archived_at,
          created_at,

@@ -1,10 +1,12 @@
 import { EventEmitter } from "node:events";
 import type { SessionRuntimeStatus } from "@syncai/shared";
 import type { Pool } from "pg";
+import { createCodexAgentAdapter } from "./codex-agent-adapter.js";
 import {
-  createMockAgentAdapter,
   type MockAgentResult,
+  type SendMessageInput,
   type StartSessionInput,
+  type StreamEvent,
 } from "./mock-agent-adapter.js";
 import {
   appendCommandSummaryEvent,
@@ -55,13 +57,12 @@ export function createWorkspaceRuntime(options: {
   db: Pool;
   logger: RuntimeLogger;
   mockLatencyMs?: number;
+  codexPath?: string;
 }): WorkspaceRuntime {
-  const adapter = createMockAgentAdapter(
-    options.mockLatencyMs === undefined
-      ? undefined
-      : {
-          latencyMs: options.mockLatencyMs,
-        },
+  const adapter = createCodexAgentAdapter(
+    options.codexPath !== undefined
+      ? { codexPath: options.codexPath }
+      : undefined,
   );
   const emitter = new EventEmitter();
   const activeSessions = new Map<string, Promise<void>>();
@@ -339,11 +340,59 @@ export function createWorkspaceRuntime(options: {
       }
 
       try {
-        const result = await adapter.sendMessage({
+        // Resolve working directory from the project linked to this session
+        let workingDirectory: string | undefined;
+        try {
+          const wdResult = await options.db.query(
+            `SELECT p.working_directory
+             FROM sessions s
+             JOIN projects p ON p.id = s.project_id
+             WHERE s.id = $1`,
+            [message.sessionId],
+          );
+          workingDirectory = wdResult.rows[0]?.working_directory ?? undefined;
+        } catch {
+          // Best effort — fall back to adapter default
+        }
+
+        let finalText = "";
+
+        const sendInput: SendMessageInput = {
           sessionId: message.sessionId,
           messageId: message.messageId,
           content: message.content,
-        });
+        };
+        if (workingDirectory) {
+          sendInput.workingDirectory = workingDirectory;
+        }
+
+        for await (const event of adapter.sendMessage(sendInput)) {
+          emitter.emit("stream.event", {
+            sessionId: message.sessionId,
+            event,
+          });
+
+          // Track agent message text for the final result
+          if (
+            event.type === "item.completed" &&
+            event.data &&
+            typeof event.data === "object" &&
+            "item" in event.data &&
+            event.data.item &&
+            typeof event.data.item === "object" &&
+            (event.data.item as Record<string, unknown>).type === "agent_message" &&
+            "text" in (event.data.item as Record<string, unknown>)
+          ) {
+            finalText = String(
+              (event.data.item as Record<string, unknown>).text,
+            );
+          }
+        }
+
+        const result: MockAgentResult = {
+          summary: finalText.slice(0, 160),
+          finalReply: finalText || "Codex completed with no output.",
+        };
 
         const hasQueuedMessages = await finalizeSuccess(message, result);
         if (!hasQueuedMessages) {
@@ -357,7 +406,7 @@ export function createWorkspaceRuntime(options: {
   }
 
   const runtime: WorkspaceRuntime = {
-    ensureSessionBinding(input: StartSessionInput) {
+    async ensureSessionBinding(input: StartSessionInput) {
       return adapter.startSession(input);
     },
 

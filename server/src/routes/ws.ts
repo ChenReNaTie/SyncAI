@@ -9,7 +9,22 @@ interface ClientSubscribeMessage {
 
 const WS_PATH = "/api/v1/ws";
 
+let registered = false;
+
 export function registerWsRoute(app: FastifyInstance): void {
+  if (registered) {
+    return;
+  }
+
+  if (!app.server) {
+    app.log.warn(
+      "registerWsRoute called before server is ready; skipping"
+    );
+    return;
+  }
+
+  registered = true;
+
   const wss = new WebSocketServer({ noServer: true });
 
   // sessionId → Set<WebSocket>
@@ -167,6 +182,28 @@ export function registerWsRoute(app: FastifyInstance): void {
     const payload = JSON.stringify({
       type: "status.changed",
       data: { runtime_status: event.runtimeStatus },
+    });
+
+    for (const ws of set) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(payload);
+      }
+    }
+  });
+
+  // Forward stream events from Codex adapter to WebSocket subscribers
+  app.workspaceRuntime.on("stream.event", (event) => {
+    const set = subscribers.get(event.sessionId);
+    if (!set) {
+      return;
+    }
+
+    const payload = JSON.stringify({
+      type: "stream.event",
+      data: {
+        sessionId: event.sessionId,
+        event: event.event,
+      },
     });
 
     for (const ws of set) {

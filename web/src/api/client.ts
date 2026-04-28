@@ -1,5 +1,17 @@
 const BASE_URL = "/api/v1";
 
+const ERROR_MESSAGES: Record<string, string> = {
+  VALIDATION_ERROR: "请求参数有误，请检查输入",
+  TEAM_NAME_EXISTS: "团队名称已存在",
+  TEAM_SLUG_EXISTS: "团队标识已被占用",
+  PROJECT_NAME_EXISTS: "项目名称已存在",
+  AUTH_REQUIRED: "登录已过期，请重新登录",
+  UNAUTHORIZED: "登录已过期，请重新登录",
+  FORBIDDEN: "无权执行此操作",
+  NOT_FOUND: "资源不存在",
+  INTERNAL_ERROR: "服务器内部错误",
+};
+
 export interface AuthUser {
   id: string;
   email: string;
@@ -53,6 +65,7 @@ export interface Project {
   id: string;
   name: string;
   description: string;
+  working_directory: string | null;
   team_id: string;
   created_at: string;
 }
@@ -64,10 +77,37 @@ export interface ProjectsResponse {
 export interface CreateProjectRequest {
   name: string;
   description: string;
+  working_directory?: string;
 }
 
 export interface CreateProjectResponse {
   data: Project;
+}
+
+// --- Agent Node ---
+
+export interface AgentNode {
+  id: string;
+  team_id: string;
+  owner_user_id: string;
+  agent_type: string;
+  node_mode: string;
+  display_name: string;
+  connection_status: string;
+  client_fingerprint: string | null;
+  last_heartbeat_at: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentNodeResponse {
+  data: AgentNode;
+}
+
+export interface UpsertAgentNodeRequest {
+  display_name: string;
+  client_fingerprint: string;
 }
 
 export interface Session {
@@ -112,9 +152,30 @@ async function request<T>(
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(
-      (body as { code?: string }).code ?? `HTTP ${res.status}`,
-    );
+    const code = (body as { code?: string }).code ?? `HTTP ${res.status}`;
+    let message = ERROR_MESSAGES[code] || code;
+    const detail = (body as { message?: string }).message || (body as { error?: string }).error;
+    if (code === "INVALID_REQUEST") {
+      const details = (body as { details?: Record<string, unknown> }).details;
+      if (details) {
+        const flattened = Object.entries(details)
+          .flatMap(([key, val]) => {
+            if (Array.isArray(val)) {
+              return val.map((v) => `${key}：${typeof v === "string" ? v : JSON.stringify(v)}`);
+            }
+            return [`${key}：${String(val)}`];
+          })
+          .join("；");
+        if (flattened) {
+          message = `${message}：${flattened}`;
+        }
+      }
+    } else if (detail && code === "VALIDATION_ERROR") {
+      message = `${message}：${detail}`;
+    } else if (detail && detail !== code) {
+      message = `${message}（${detail}）`;
+    }
+    throw new Error(message);
   }
 
   return res.json() as Promise<T>;
@@ -194,6 +255,7 @@ export function createProject(
   teamId: string,
   name: string,
   description: string,
+  workingDirectory?: string,
 ): Promise<CreateProjectResponse> {
   return request<CreateProjectResponse>(`/teams/${teamId}/projects`, {
     method: "POST",
@@ -201,7 +263,13 @@ export function createProject(
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ name, description }),
+    body: JSON.stringify({
+      name,
+      description,
+      ...(workingDirectory !== undefined && workingDirectory !== ""
+        ? { working_directory: workingDirectory }
+        : {}),
+    }),
   });
 }
 
@@ -264,7 +332,13 @@ export interface MessagesResponse {
 }
 
 export interface SendMessageResponse {
-  data: Message;
+  data: {
+    message: Message;
+    dispatch_state: {
+      session_runtime_status: string;
+      queue_position: number;
+    };
+  };
 }
 
 export function getSessionDetail(
@@ -297,6 +371,36 @@ export function sendMessage(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ content }),
+  });
+}
+
+// --- Team Members ---
+
+export interface TeamMember {
+  team_id: string;
+  user_id: string;
+  role: "admin" | "member";
+  joined_at: string;
+  invited_by: string | null;
+}
+
+export interface AddTeamMemberResponse {
+  data: TeamMember;
+}
+
+export function addTeamMember(
+  token: string,
+  teamId: string,
+  email: string,
+  role: "admin" | "member",
+): Promise<AddTeamMemberResponse> {
+  return request<AddTeamMemberResponse>(`/teams/${teamId}/members`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ email, role }),
   });
 }
 
@@ -416,5 +520,35 @@ export function updateTodoStatus(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ status }),
+  });
+}
+
+// --- Agent Node ---
+
+export function getAgentNode(
+  token: string,
+  teamId: string,
+): Promise<AgentNodeResponse> {
+  return request<AgentNodeResponse>(`/teams/${teamId}/agent-node`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export function upsertAgentNode(
+  token: string,
+  teamId: string,
+  displayName: string,
+  clientFingerprint: string,
+): Promise<AgentNodeResponse> {
+  return request<AgentNodeResponse>(`/teams/${teamId}/agent-node`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      display_name: displayName,
+      client_fingerprint: clientFingerprint,
+    }),
   });
 }

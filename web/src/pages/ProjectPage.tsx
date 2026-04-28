@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { getSessions, createSession } from "../api/client.js";
+import { PageShell, GlassCard, Button, Input, Badge, PageLoading } from "../components/index.js";
 
 interface Session {
   id: string;
@@ -20,7 +21,6 @@ export function ProjectPage() {
   const [error, setError] = useState<string | null>(null);
   const [visibilityFilter, setVisibilityFilter] = useState<string>("");
 
-  // Create session form state
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [sessionTitle, setSessionTitle] = useState("");
   const [sessionVisibility, setSessionVisibility] = useState<"shared" | "private">("shared");
@@ -30,14 +30,8 @@ export function ProjectPage() {
   const token = localStorage.getItem("token");
 
   useEffect(() => {
-    if (!token) {
-      navigate("/login");
-      return;
-    }
-    if (!projectId) {
-      navigate("/dashboard");
-      return;
-    }
+    if (!token) { navigate("/login"); return; }
+    if (!projectId) { navigate("/dashboard"); return; }
     loadSessions();
   }, [projectId, token, navigate, visibilityFilter]);
 
@@ -45,18 +39,14 @@ export function ProjectPage() {
     try {
       setLoading(true);
       setError(null);
-
       const params = visibilityFilter
         ? { visibility: visibilityFilter as "shared" | "private" }
         : undefined;
-
       const res = await getSessions(token!, projectId!, params);
       setSessions(res.data);
     } catch (err: any) {
       if (err.message === "UNAUTHORIZED" || err.message.includes("401")) {
-        localStorage.removeItem("token");
-        navigate("/login");
-        return;
+        localStorage.removeItem("token"); navigate("/login"); return;
       }
       setError(err.message || "Failed to load sessions");
     } finally {
@@ -70,18 +60,13 @@ export function ProjectPage() {
       setCreateError("Session title is required");
       return;
     }
-
     try {
       setCreating(true);
       setCreateError(null);
-
       await createSession(token!, projectId!, sessionTitle.trim(), sessionVisibility);
-
       setSessionTitle("");
       setSessionVisibility("shared");
       setShowCreateForm(false);
-
-      // Reload sessions
       const params = visibilityFilter
         ? { visibility: visibilityFilter as "shared" | "private" }
         : undefined;
@@ -94,131 +79,102 @@ export function ProjectPage() {
     }
   };
 
-  if (loading) {
-    return (
-      <main className="page-shell">
-        <section className="hero">
-          <h1>Loading Sessions...</h1>
-        </section>
-      </main>
-    );
-  }
+  if (loading) return <PageLoading label="Loading sessions..." />;
 
   if (error) {
     return (
-      <main className="page-shell">
-        <header className="page-header">
-          <Link to="/dashboard">&larr; Back to Dashboard</Link>
-        </header>
-        <section className="content-section">
-          <div className="alert alert-error">
-            <p>Error: {error}</p>
-          </div>
-        </section>
-      </main>
+      <PageShell title="Error" backTo={{ label: "返回 Dashboard", href: "/dashboard" }}>
+        <GlassCard>
+          <p className="text-danger">{error}</p>
+        </GlassCard>
+      </PageShell>
     );
   }
 
   return (
-    <main className="page-shell">
-      <header className="page-header">
-        <Link to="/dashboard">&larr; Back to Dashboard</Link>
-      </header>
-
-      <section className="content-section">
-        <h2>
-          Sessions <small>(Project: {projectId})</small>
-        </h2>
-      </section>
-
-      <section className="content-section">
-        <div className="section-header">
-          <h3>Sessions</h3>
-          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+    <PageShell
+      title="会话列表"
+      backTo={{ label: "返回 Dashboard", href: "/dashboard" }}
+    >
+      <GlassCard>
+        <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
+          <div className="flex items-center gap-3">
+            <h3 className="text-lg font-semibold text-text-primary">所有会话</h3>
             <select
               value={visibilityFilter}
               onChange={(e) => setVisibilityFilter(e.target.value)}
-              className="form-control"
-              style={{ width: "auto" }}
+              className="px-3 py-1.5 rounded-md bg-surface-2 border border-glass-border text-text-primary text-xs focus:outline-none focus:border-accent/50"
             >
-              <option value="">All</option>
-              <option value="shared">Shared</option>
-              <option value="private">Private</option>
+              <option value="">全部</option>
+              <option value="shared">共享</option>
+              <option value="private">私有</option>
             </select>
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => setShowCreateForm(!showCreateForm)}
-            >
-              {showCreateForm ? "Cancel" : "+ Create Session"}
-            </button>
           </div>
+          <Button
+            variant={showCreateForm ? "secondary" : "primary"}
+            size="sm"
+            onClick={() => setShowCreateForm(!showCreateForm)}
+          >
+            {showCreateForm ? "取消" : "+ 创建会话"}
+          </Button>
         </div>
 
         {showCreateForm && (
-          <form onSubmit={handleCreateSession} className="form">
-            {createError && (
-              <div className="alert alert-error">
-                <p>{createError}</p>
+          <form onSubmit={handleCreateSession} className="mb-4 animate-fade-in">
+            <div className="p-4 rounded-lg bg-surface-2 border border-glass-border">
+              {createError && (
+                <div className="px-3 py-2 rounded-md bg-danger-muted border border-danger/30 text-sm text-danger mb-3">
+                  {createError}
+                </div>
+              )}
+              <div className="flex flex-col sm:flex-row gap-3">
+                <Input
+                  value={sessionTitle}
+                  onChange={(e) => setSessionTitle(e.target.value)}
+                  placeholder="会话标题"
+                  className="flex-1"
+                  required
+                />
+                <select
+                  value={sessionVisibility}
+                  onChange={(e) => setSessionVisibility(e.target.value as "shared" | "private")}
+                  className="w-full sm:w-32 px-3.5 py-2.5 rounded-button bg-surface-2 border border-glass-border text-text-primary text-sm focus:outline-none focus:border-accent/50 focus:ring-2 focus:ring-accent/20"
+                >
+                  <option value="shared">共享</option>
+                  <option value="private">私有</option>
+                </select>
+                <Button type="submit" loading={creating} className="shrink-0">
+                  创建会话
+                </Button>
               </div>
-            )}
-
-            <div className="form-group">
-              <label htmlFor="sessionTitle">Session Title</label>
-              <input
-                id="sessionTitle"
-                type="text"
-                value={sessionTitle}
-                onChange={(e) => setSessionTitle(e.target.value)}
-                placeholder="Enter session title"
-                className="form-control"
-                required
-              />
             </div>
-
-            <div className="form-group">
-              <label htmlFor="sessionVisibility">Visibility</label>
-              <select
-                id="sessionVisibility"
-                value={sessionVisibility}
-                onChange={(e) =>
-                  setSessionVisibility(e.target.value as "shared" | "private")
-                }
-                className="form-control"
-              >
-                <option value="shared">Shared</option>
-                <option value="private">Private</option>
-              </select>
-            </div>
-
-            <button
-              type="submit"
-              className="btn btn-primary"
-              disabled={creating}
-            >
-              {creating ? "Creating..." : "Create Session"}
-            </button>
           </form>
         )}
 
         {sessions.length === 0 ? (
-          <p>No sessions yet.</p>
+          <p className="text-sm text-text-muted py-4">还没有会话，点击上方按钮创建一个。</p>
         ) : (
-          <ul className="team-grid">
+          <div className="grid gap-3 sm:grid-cols-2">
             {sessions.map((session) => (
-              <li key={session.id} className="card">
-                <h4><Link to={`/sessions/${session.id}`}>{session.title}</Link></h4>
-                <p>
-                  <strong>Visibility:</strong> {session.visibility}
-                </p>
-                <small>
-                  Created: {new Date(session.created_at).toLocaleString()}
-                </small>
-              </li>
+              <Link key={session.id} to={`/sessions/${session.id}`} className="block">
+                <div className="p-4 rounded-lg bg-surface-2 border border-glass-border hover:border-accent/30 hover:bg-glass-hover transition-all duration-200 group">
+                  <div className="flex items-center gap-2 mb-1">
+                    <h4 className="font-semibold text-text-primary group-hover:text-accent-light transition-colors">
+                      {session.title}
+                    </h4>
+                    <Badge variant={session.visibility === "shared" ? "success" : "default"}>
+                      {session.visibility}
+                    </Badge>
+                  </div>
+                  <p className="text-xs text-text-muted mt-1">
+                    {new Date(session.created_at).toLocaleString()}
+                  </p>
+                </div>
+              </Link>
             ))}
-          </ul>
+          </div>
         )}
-      </section>
-    </main>
+      </GlassCard>
+    </PageShell>
   );
 }

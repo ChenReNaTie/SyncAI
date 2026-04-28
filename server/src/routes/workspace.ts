@@ -262,6 +262,7 @@ function serializeMessage(row: Record<string, unknown>) {
   return {
     id: row.id,
     session_id: row.session_id,
+    sender: row.sender_type === 'member' ? 'user' : 'agent',
     sender_type: row.sender_type,
     sender_user_id: row.sender_user_id,
     content: row.content,
@@ -339,6 +340,7 @@ async function loadProjectContext(app: FastifyInstance, projectId: string) {
        p.id,
        p.team_id,
        p.created_by,
+       p.working_directory,
        EXISTS(
          SELECT 1
          FROM team_agent_nodes candidate
@@ -641,10 +643,17 @@ export async function registerWorkspaceRoutes(
     }
 
     const sessionId = randomUUID();
+    const workingDirectory = project.working_directory
+      ? String(project.working_directory)
+      : undefined;
+
     const binding = await app.workspaceRuntime.ensureSessionBinding({
       teamId: String(project.team_id),
       sessionId,
       nodeId: String(project.online_node_id),
+      ...(workingDirectory !== undefined
+        ? ({ workingDirectory } as const)
+        : {}),
     });
 
     const result = await app.db.query(

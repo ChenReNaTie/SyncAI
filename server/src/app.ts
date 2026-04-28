@@ -55,7 +55,12 @@ export async function buildApp() {
     await registerWorkspaceRoutes(api);
   }, { prefix: "/api/v1" });
 
-  registerWsRoute(app);
+  // Register WebSocket upgrade handler after the server is ready.
+  // Fastify 5 creates the underlying HTTP server during ready() / listen(),
+  // so app.server may be null before that.
+  app.addHook("onReady", async () => {
+    registerWsRoute(app);
+  });
 
   return { app, env };
 }

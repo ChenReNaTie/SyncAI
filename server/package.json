@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@fastify/cors": "^11.1.0",
+    "@openai/codex-sdk": "file:E:/06_open_source_project/codex-main/sdk/typescript",
     "@syncai/shared": "file:../packages/shared",
     "fastify": "^5.3.3",
     "pg": "^8.16.3",

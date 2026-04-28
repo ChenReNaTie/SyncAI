@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import {
   getSessionDetail,
   getMessages,
@@ -10,81 +10,321 @@ import {
   updateTodoStatus,
 } from "../api/client.js";
 import { createSessionSocket } from "../api/socket.js";
-import type {
-  SessionDetail,
-  Message,
-  Todo,
-  TodoStatus,
-} from "../api/client.js";
+import type { SocketStreamEvent } from "../api/socket.js";
+import type { SessionDetail, Message, Todo, TodoStatus } from "../api/client.js";
+import { PageShell, GlassCard, Button, Input, Badge, PageLoading } from "../components/index.js";
+
+/* ------------------------------------------------------------------ */
+/*  Stream event types (mirrors Codex SDK ThreadEvent / ThreadItem)    */
+/* ------------------------------------------------------------------ */
+
+interface CodexStreamEvent {
+  type: string;
+  data: Record<string, unknown>;
+}
+
+type ItemType =
+  | "command_execution"
+  | "agent_message"
+  | "reasoning"
+  | "file_change"
+  | "mcp_tool_call"
+  | "web_search"
+  | "todo_list"
+  | "error";
+
+/* ------------------------------------------------------------------ */
+/*  Stream-event → UI helper                                           */
+/* ------------------------------------------------------------------ */
+
+interface RenderedEvent {
+  id: string;
+  icon: string;
+  text: string;
+  color: string;
+  spinning: boolean;
+}
+
+let _eventSeq = 0;
+
+function renderStreamEvent(ev: CodexStreamEvent): RenderedEvent | null {
+  const d = ev.data ?? {};
+  const data = d as Record<string, unknown>;
+  const item = data.item as Record<string, unknown> | undefined;
+
+  switch (ev.type) {
+    // ── Thread-level events ──
+    case "thread.started":
+      return {
+        id: `th-${++_eventSeq}`,
+        icon: "🧵",
+        text: `Thread started: ${String(data.thread_id ?? "—")}`,
+        color: "text-text-muted",
+        spinning: false,
+      };
+
+    case "turn.started":
+      return {
+        id: `ts-${++_eventSeq}`,
+        icon: "🔄",
+        text: "Turn started",
+        color: "text-text-muted",
+        spinning: true,
+      };
+
+    case "turn.completed": {
+      const usage = data.usage as Record<string, number> | undefined;
+      const input = usage?.input_tokens ?? 0;
+      const cached = usage?.cached_input_tokens ?? 0;
+      const output = usage?.output_tokens ?? 0;
+      return {
+        id: `tc-${++_eventSeq}`,
+        icon: "📊",
+        text: `Turn completed — ${input + output} tokens (in: ${input}, cached: ${cached}, out: ${output})`,
+        color: "text-accent-light",
+        spinning: false,
+      };
+    }
+
+    case "turn.failed": {
+      const errMsg =
+        data.error && typeof data.error === "object"
+          ? (data.error as Record<string, unknown>).message
+          : "Unknown error";
+      return {
+        id: `tf-${++_eventSeq}`,
+        icon: "❌",
+        text: `Turn failed: ${String(errMsg)}`,
+        color: "text-danger",
+        spinning: false,
+      };
+    }
+
+    // ── Error event (stream-level) ──
+    case "error":
+      return {
+        id: `err-${++_eventSeq}`,
+        icon: "⚠️",
+        text: `Error: ${String(data.message ?? "Unknown")}`,
+        color: "text-danger",
+        spinning: false,
+      };
+
+    // ── Item events ──
+    case "item.started":
+      return renderItemRow("started", item);
+    case "item.updated":
+      return renderItemRow("updated", item);
+    case "item.completed":
+      return renderItemRow("completed", item);
+
+    default:
+      return null;
+  }
+}
+
+function renderItemRow(
+  phase: "started" | "updated" | "completed",
+  item: Record<string, unknown> | undefined,
+): RenderedEvent | null {
+  if (!item) return null;
+
+  const id = String(item.id ?? ++_eventSeq);
+  const itemType = String(item.type ?? "") as ItemType;
+  const status = String(item.status ?? "");
+  const spinning = status === "in_progress";
+
+  const itemId = `${itemType}-${id}-${phase}`;
+
+  switch (itemType) {
+    case "command_execution": {
+      const command = String(item.command ?? "").slice(0, 80);
+      const exitCode = item.exit_code != null ? Number(item.exit_code) : undefined;
+      const isOk = exitCode === 0;
+
+      if (status === "completed" && isOk) {
+        return { id: itemId, icon: "✓", text: command, color: "text-success", spinning: false };
+      }
+      if (status === "completed" || status === "failed") {
+        return { id: itemId, icon: "✗", text: command, color: "text-danger", spinning: false };
+      }
+      // in_progress
+      return { id: itemId, icon: "🔄", text: command, color: "text-accent-light", spinning: true };
+    }
+
+    case "agent_message": {
+      const text = String(item.text ?? "");
+      // Only show completed/updated — started has no content yet
+      if (phase === "started") {
+        return { id: itemId, icon: "💬", text: "Generating…", color: "text-accent-light", spinning: true };
+      }
+      return { id: itemId, icon: "💬", text, color: "text-text-primary", spinning: false };
+    }
+
+    case "reasoning": {
+      const text = String(item.text ?? "").slice(0, 200);
+      return { id: itemId, icon: "🧠", text, color: "text-text-secondary", spinning };
+    }
+
+    case "file_change": {
+      const changes = item.changes as Array<{ path: string; kind: string }> | undefined;
+      const paths = changes?.map((c) => {
+        const kindIcon = c.kind === "add" ? "+" : c.kind === "delete" ? "🗑" : "✎";
+        return `${kindIcon} ${c.path}`;
+      }).join("  ") ?? "";
+      const suffix = status === "failed" ? " (failed)" : "";
+      return {
+        id: itemId,
+        icon: "📝",
+        text: `${paths}${suffix}`,
+        color: status === "failed" ? "text-danger" : "text-text-primary",
+        spinning: status === "in_progress",
+      };
+    }
+
+    case "mcp_tool_call": {
+      const server = String(item.server ?? "");
+      const tool = String(item.tool ?? "");
+      const resultStr = item.result ? " ✓" : "";
+      const err = item.error ? ` ❌ ${String(item.error)}` : "";
+      return {
+        id: itemId,
+        icon: "🔌",
+        text: `${server}:${tool}${resultStr}${err}`.slice(0, 120),
+        color: item.error ? "text-danger" : "text-accent-light",
+        spinning: status === "in_progress",
+      };
+    }
+
+    case "web_search": {
+      const query = String(item.query ?? "");
+      return {
+        id: itemId,
+        icon: "🔍",
+        text: query.slice(0, 100),
+        color: "text-text-secondary",
+        spinning: false,
+      };
+    }
+
+    case "todo_list": {
+      const items = item.items as Array<{ text: string; completed: boolean }> | undefined;
+      const list = items?.map((t) => `${t.completed ? "☑" : "☐"} ${t.text}`).join("  ") ?? "";
+      return {
+        id: itemId,
+        icon: "📋",
+        text: list.slice(0, 150),
+        color: "text-text-secondary",
+        spinning: false,
+      };
+    }
+
+    case "error": {
+      return {
+        id: itemId,
+        icon: "⚠️",
+        text: String(item.message ?? "Unknown item error").slice(0, 120),
+        color: "text-danger",
+        spinning: false,
+      };
+    }
+
+    default:
+      return null;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Page component                                                     */
+/* ------------------------------------------------------------------ */
 
 export function SessionPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const streamListRef = useRef<HTMLDivElement>(null);
 
   const [session, setSession] = useState<SessionDetail | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Send message form state
   const [content, setContent] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
 
-  // Replay state
   const [replayMode, setReplayMode] = useState(false);
   const [replayMessages, setReplayMessages] = useState<Message[]>([]);
   const [replayLoading, setReplayLoading] = useState(false);
 
-  // Todo state
   const [todos, setTodos] = useState<Todo[]>([]);
   const [todosLoading, setTodosLoading] = useState(false);
-  // Which message is having a todo created (its id), null means none
   const [newTodoMessageId, setNewTodoMessageId] = useState<string | null>(null);
   const [newTodoTitle, setNewTodoTitle] = useState("");
   const [todoCreating, setTodoCreating] = useState(false);
   const [todoError, setTodoError] = useState<string | null>(null);
 
+  // Live stream events for the current processing round
+  const [streamEvents, setStreamEvents] = useState<CodexStreamEvent[]>([]);
+  const [streamCollapsed, setStreamCollapsed] = useState(false);
+
   const token = localStorage.getItem("token");
   const socketRef = useRef<ReturnType<typeof createSessionSocket> | null>(null);
 
   useEffect(() => {
-    if (!token) {
-      navigate("/login");
-      return;
-    }
-    if (!sessionId) {
-      navigate("/dashboard");
-      return;
-    }
+    if (!token) { navigate("/login"); return; }
+    if (!sessionId) { navigate("/dashboard"); return; }
     loadSession();
     loadMessages();
     loadTodos();
   }, [sessionId, token, navigate]);
 
-  // WebSocket: connect on mount, disconnect on unmount
   useEffect(() => {
     if (!token || !sessionId) return;
-
-    const socket = createSessionSocket(token, {
-      onMessage(msg: Message) {
-        setMessages((prev) => {
-          // dedup by message id
-          if (prev.some((m) => m.id === msg.id)) return prev;
-          return [...prev, msg];
-        });
+    const socket = createSessionSocket(
+      token,
+      {
+        onMessage(msg: Message) {
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === msg.id)) return prev;
+            return [...prev, msg];
+          });
+          // Agent message arrived → clear stream events
+          if (msg.sender === "agent" || msg.sender !== "user") {
+            setStreamEvents([]);
+          }
+        },
+        onStatusChanged(status: string) {
+          setSession((prev) => (prev ? { ...prev, runtime_status: status } : prev));
+        },
+        onStreamEvent(ev: CodexStreamEvent) {
+          setStreamEvents((prev) => {
+            // For agent_message items, replace previous partial updates for the same item
+            if (
+              ev.type === "item.updated" ||
+              ev.type === "item.completed"
+            ) {
+              const evData = ev.data as Record<string, unknown>;
+              const item = evData?.item as Record<string, unknown> | undefined;
+              if (item?.type === "agent_message") {
+                const itemId = item.id;
+                const filtered = prev.filter((p) => {
+                  const pd = p.data as Record<string, unknown>;
+                  const pi = pd?.item as Record<string, unknown> | undefined;
+                  // Keep non-agent_message items and the same item id
+                  if (pi?.type !== "agent_message") return true;
+                  return pi?.id === itemId;
+                });
+                return [...filtered, ev];
+              }
+            }
+            return [...prev, ev];
+          });
+        },
       },
-      onStatusChanged(status: string) {
-        setSession((prev) =>
-          prev ? { ...prev, runtime_status: status } : prev,
-        );
-      },
-    });
-
-    socket.subscribe(sessionId);
+      sessionId, // auto-subscribe as soon as the socket opens
+    );
     socketRef.current = socket;
-
     return () => {
       socket.close();
       socketRef.current = null;
@@ -93,7 +333,14 @@ export function SessionPage() {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, replayMessages]);
+  }, [messages, replayMessages, streamEvents]);
+
+  // Auto-scroll stream card to bottom when new events arrive
+  useEffect(() => {
+    if (streamListRef.current) {
+      streamListRef.current.scrollTop = streamListRef.current.scrollHeight;
+    }
+  }, [streamEvents]);
 
   const loadSession = async () => {
     try {
@@ -101,9 +348,7 @@ export function SessionPage() {
       setSession(res.data);
     } catch (err: any) {
       if (err.message === "UNAUTHORIZED" || err.message.includes("401")) {
-        localStorage.removeItem("token");
-        navigate("/login");
-        return;
+        localStorage.removeItem("token"); navigate("/login"); return;
       }
       setError(err.message || "Failed to load session");
     }
@@ -117,9 +362,7 @@ export function SessionPage() {
       setMessages(res.data);
     } catch (err: any) {
       if (err.message === "UNAUTHORIZED" || err.message.includes("401")) {
-        localStorage.removeItem("token");
-        navigate("/login");
-        return;
+        localStorage.removeItem("token"); navigate("/login"); return;
       }
       setError(err.message || "Failed to load messages");
     } finally {
@@ -132,25 +375,24 @@ export function SessionPage() {
       setTodosLoading(true);
       const res = await getTodos(token!, sessionId!);
       setTodos(res.data);
-    } catch (err: any) {
-      // silently ignore todo load errors in the UI
+    } catch {
+      // silently ignore
     } finally {
       setTodosLoading(false);
     }
   };
 
-  // --- Replay ---
-
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = content.trim();
     if (!trimmed) return;
-
     try {
       setSending(true);
       setSendError(null);
+      // Clear previous stream events for the new round
+      setStreamEvents([]);
       const res = await sendMessage(token!, sessionId!, trimmed);
-      setMessages((prev) => [...prev, res.data]);
+      setMessages((prev) => [...prev, res.data.message]);
       setContent("");
     } catch (err: any) {
       setSendError(err.message || "Failed to send message");
@@ -158,8 +400,6 @@ export function SessionPage() {
       setSending(false);
     }
   };
-
-  // --- Replay ---
 
   const handleToggleReplay = async () => {
     if (replayMode) {
@@ -170,10 +410,8 @@ export function SessionPage() {
     try {
       setReplayLoading(true);
       const res = await getReplay(token!, sessionId!);
-      // sort by created_at ascending
       const sorted = [...res.data].sort(
-        (a, b) =>
-          new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+        (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
       );
       setReplayMessages(sorted);
       setReplayMode(true);
@@ -183,8 +421,6 @@ export function SessionPage() {
       setReplayLoading(false);
     }
   };
-
-  // --- Todo ---
 
   const handleNewTodoClick = (messageId: string) => {
     setNewTodoMessageId(messageId);
@@ -219,340 +455,256 @@ export function SessionPage() {
     const nextStatus: TodoStatus = todo.status === "done" ? "pending" : "done";
     try {
       const res = await updateTodoStatus(token!, todo.id, nextStatus);
-      setTodos((prev) =>
-        prev.map((t) => (t.id === todo.id ? res.data : t)),
-      );
-    } catch (err: any) {
+      setTodos((prev) => prev.map((t) => (t.id === todo.id ? res.data : t)));
+    } catch {
       // silently ignore
     }
   };
 
   const displayMessages = replayMode ? replayMessages : messages;
+  const projectLink = session?.project_id ? `/projects/${session.project_id}` : "/dashboard";
 
-  if (loading && !session) {
-    return (
-      <main className="page-shell">
-        <section className="hero">
-          <h1>Loading Session...</h1>
-        </section>
-      </main>
-    );
-  }
+  // Render stream events into UI rows
+  const renderedEvents = streamEvents
+    .map(renderStreamEvent)
+    .filter((r): r is RenderedEvent => r !== null);
+
+  if (loading && !session) return <PageLoading label="Loading session..." />;
 
   if (error && !session) {
     return (
-      <main className="page-shell">
-        <header className="page-header">
-          <Link to="/dashboard">&larr; Back to Dashboard</Link>
-        </header>
-        <section className="content-section">
-          <div className="alert alert-error">
-            <p>Error: {error}</p>
-          </div>
-        </section>
-      </main>
+      <PageShell title="Error" backTo={{ label: "返回 Dashboard", href: "/dashboard" }}>
+        <GlassCard>
+          <p className="text-danger">{error}</p>
+        </GlassCard>
+      </PageShell>
     );
   }
 
-  const projectLink = session?.project_id
-    ? `/projects/${session.project_id}`
-    : "/dashboard";
-
   return (
-    <main
-      className="page-shell"
-      style={{ display: "flex", flexDirection: "column", height: "100vh" }}
+    <PageShell
+      backTo={{ label: "返回项目", href: projectLink }}
+      fullHeight
     >
-      <header className="page-header">
-        <Link to={projectLink}>&larr; Back to Project</Link>
-      </header>
-
-      <section className="content-section">
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            flexWrap: "wrap",
-            gap: "12px",
-          }}
-        >
-          <h2>
+      {/* Header */}
+      <div className="flex items-center justify-between flex-wrap gap-3 mb-4 shrink-0">
+        <div className="flex items-center gap-3 min-w-0">
+          <h1 className="text-xl font-bold text-text-primary truncate">
             {session?.title ?? "Session"}
-            {session?.runtime_status && (
-              <small style={{ marginLeft: "12px", color: "#666" }}>
-                [{session.runtime_status}]
-              </small>
-            )}
-            {replayMode && (
-              <span style={{ marginLeft: "8px", color: "#e67e22" }}>
-                [REPLAY]
-              </span>
-            )}
-          </h2>
-          <button
-            className={replayMode ? "btn btn-outline" : "btn btn-secondary"}
-            onClick={handleToggleReplay}
-            disabled={replayLoading}
-          >
-            {replayLoading ? "Loading..." : replayMode ? "Exit Replay" : "Replay"}
-          </button>
+          </h1>
+          {session?.runtime_status && (
+            <Badge variant="accent">{session.runtime_status}</Badge>
+          )}
+          {replayMode && (
+            <Badge variant="warning">REPLAY</Badge>
+          )}
         </div>
-      </section>
+        <Button
+          variant={replayMode ? "secondary" : "ghost"}
+          size="sm"
+          onClick={handleToggleReplay}
+          loading={replayLoading}
+        >
+          {replayMode ? "退出回放" : "Replay"}
+        </Button>
+      </div>
 
-      <section
-        className="content-section"
-        style={{
-          flex: 1,
-          overflowY: "auto",
-          maxHeight: "calc(100vh - 220px)",
-          paddingBottom: "16px",
-        }}
-      >
-        {loading && displayMessages.length === 0 ? (
-          <p>Loading messages...</p>
-        ) : displayMessages.length === 0 ? (
-          <p>No messages yet. Start the conversation!</p>
-        ) : (
-          <div>
-            {displayMessages.map((msg) => (
-              <div
-                key={msg.id}
-                style={{
-                  padding: "8px 0",
-                  borderBottom: "1px solid #eee",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    marginBottom: "4px",
-                  }}
-                >
-                  <strong>{msg.sender}</strong>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    {!replayMode && (
-                      <button
-                        className="btn btn-sm"
-                        style={{
-                          fontSize: "12px",
-                          padding: "2px 8px",
-                          background: "#f0f0f0",
-                          border: "1px solid #ddd",
-                          borderRadius: "4px",
-                          cursor: "pointer",
-                        }}
-                        onClick={() => handleNewTodoClick(msg.id)}
-                      >
-                        + Todo
-                      </button>
-                    )}
-                    <small style={{ color: "#888" }}>
-                      {new Date(msg.created_at).toLocaleString()}
-                    </small>
-                  </div>
-                </div>
-                <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-                  {msg.content}
-                </p>
-
-                {/* Inline todo creation form */}
-                {newTodoMessageId === msg.id && (
+      {/* Messages Area */}
+      <GlassCard className="flex-1 min-h-0 flex flex-col mb-4 overflow-hidden">
+        <div className="flex-1 overflow-y-auto -mx-6 -mt-6 px-6 pt-6 pb-2">
+          {displayMessages.length === 0 && renderedEvents.length === 0 ? (
+            <p className="text-sm text-text-muted text-center py-12">还没有消息，开始对话吧！</p>
+          ) : (
+            <div className="flex flex-col gap-1">
+              {displayMessages.map((msg) => {
+                const isUser = msg.sender === "user" || msg.sender !== "ai";
+                return (
                   <div
-                    style={{
-                      marginTop: "8px",
-                      padding: "8px",
-                      background: "#fafafa",
-                      borderRadius: "4px",
-                      border: "1px solid #eee",
-                    }}
+                    key={msg.id}
+                    className={`flex ${isUser ? "justify-end" : "justify-start"} animate-fade-in`}
                   >
-                    {todoError && (
-                      <div style={{ color: "red", marginBottom: "4px", fontSize: "13px" }}>
-                        {todoError}
+                    <div
+                      className={`max-w-[80%] px-4 py-3 rounded-2xl ${
+                        isUser
+                          ? "bg-accent-muted border border-accent/20 rounded-br-md"
+                          : "bg-surface-2 border border-glass-border rounded-bl-md"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <span className={`text-xs font-medium ${isUser ? "text-accent-light" : "text-text-muted"}`}>
+                          {msg.sender}
+                        </span>
+                        <span className="text-[10px] text-text-muted">
+                          {new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        </span>
                       </div>
-                    )}
-                    <div style={{ display: "flex", gap: "6px" }}>
-                      <input
-                        type="text"
-                        value={newTodoTitle}
-                        onChange={(e) => setNewTodoTitle(e.target.value)}
-                        placeholder="Todo title..."
-                        style={{ flex: 1 }}
-                        className="form-control"
-                        disabled={todoCreating}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") handleCreateTodo(msg.id);
-                        }}
-                      />
-                      <button
-                        className="btn btn-primary btn-sm"
-                        onClick={() => handleCreateTodo(msg.id)}
-                        disabled={todoCreating || !newTodoTitle.trim()}
-                        style={{ fontSize: "12px", padding: "2px 12px" }}
-                      >
-                        {todoCreating ? "..." : "Add"}
-                      </button>
-                      <button
-                        className="btn btn-secondary btn-sm"
-                        onClick={handleCancelTodo}
-                        disabled={todoCreating}
-                        style={{ fontSize: "12px", padding: "2px 12px" }}
-                      >
-                        Cancel
-                      </button>
+                      <p className="text-sm text-text-primary whitespace-pre-wrap break-words leading-relaxed">
+                        {msg.content}
+                      </p>
+
+                      {/* Todo button */}
+                      {!replayMode && (
+                        <div className="flex gap-2 mt-2">
+                          <button
+                            className="text-xs text-text-muted hover:text-accent-light transition-colors flex items-center gap-1"
+                            onClick={() => handleNewTodoClick(msg.id)}
+                          >
+                            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                              <path d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z" />
+                            </svg>
+                            Todo
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Inline todo form */}
+                      {newTodoMessageId === msg.id && (
+                        <div className="mt-2 p-3 rounded-lg bg-surface-3 border border-glass-border animate-fade-in">
+                          {todoError && (
+                            <p className="text-xs text-danger mb-2">{todoError}</p>
+                          )}
+                          <div className="flex gap-2">
+                            <Input
+                              value={newTodoTitle}
+                              onChange={(e) => setNewTodoTitle(e.target.value)}
+                              placeholder="Todo 标题..."
+                              className="!text-xs !py-1.5"
+                              disabled={todoCreating}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") handleCreateTodo(msg.id);
+                              }}
+                            />
+                            <Button size="sm" onClick={() => handleCreateTodo(msg.id)} loading={todoCreating} disabled={!newTodoTitle.trim()}>
+                              添加
+                            </Button>
+                            <Button variant="ghost" size="sm" onClick={handleCancelTodo} disabled={todoCreating}>
+                              取消
+                            </Button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
-                )}
+                );
+              })}
+
+              {/* ── Stream Event Status Card ── */}
+              {!replayMode && renderedEvents.length > 0 && (
+                <div className="flex justify-start animate-fade-in">
+                  <div className="max-w-[85%] min-w-[60%] bg-surface-2/80 border border-glass-border rounded-2xl rounded-bl-md overflow-hidden">
+                    {/* Card header */}
+                    <div className="flex items-center justify-between px-4 py-2 border-b border-glass-border bg-surface-3/50">
+                      <div className="flex items-center gap-2">
+                        <span className="inline-block w-2 h-2 rounded-full bg-accent animate-pulse" />
+                        <span className="text-xs font-medium text-accent-light">
+                          实时处理中…
+                        </span>
+                      </div>
+                      <button
+                        className="text-xs text-text-muted hover:text-text-primary transition-colors"
+                        onClick={() => setStreamCollapsed((v) => !v)}
+                      >
+                        {streamCollapsed ? "展开" : "收起"}
+                      </button>
+                    </div>
+
+                    {/* Card body */}
+                    {!streamCollapsed && (
+                      <div
+                        ref={streamListRef}
+                        className="px-4 py-2 max-h-[280px] overflow-y-auto flex flex-col gap-1"
+                      >
+                        {renderedEvents.map((re) => (
+                          <div key={re.id} className="flex items-start gap-2 py-0.5">
+                            <span
+                              className={`shrink-0 text-sm leading-5 ${re.spinning ? "animate-spin inline-block" : ""}`}
+                              style={re.spinning ? { animationDuration: "2s" } : undefined}
+                            >
+                              {re.icon}
+                            </span>
+                            <span className={`text-xs leading-5 break-all ${re.color}`}>
+                              {re.text}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div ref={messagesEndRef} />
+            </div>
+          )}
+        </div>
+      </GlassCard>
+
+      {/* Todo List */}
+      {!replayMode && todos.length > 0 && (
+        <GlassCard className="shrink-0 mb-4 !p-4 max-h-[180px] overflow-y-auto">
+          <h3 className="text-sm font-semibold text-text-primary mb-2 flex items-center gap-2">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" className="text-accent">
+              <path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0Z" />
+            </svg>
+            待办 ({todos.filter((t) => t.status === "pending").length} 项未完成)
+          </h3>
+          <div className="flex flex-col gap-1.5">
+            {todos.map((todo) => (
+              <div key={todo.id} className="flex items-center justify-between gap-2 py-1.5 border-b border-glass-border last:border-0">
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <Badge variant={todo.status === "done" ? "success" : "warning"}>
+                    {todo.status === "done" ? "完成" : "待办"}
+                  </Badge>
+                  <span
+                    className={`text-sm truncate ${todo.status === "done" ? "line-through text-text-muted" : "text-text-primary"}`}
+                  >
+                    {todo.title}
+                  </span>
+                </div>
+                <Button
+                  variant={todo.status === "pending" ? "primary" : "secondary"}
+                  size="sm"
+                  onClick={() => handleToggleTodoStatus(todo)}
+                  className="!text-xs !py-1 !px-2 shrink-0"
+                >
+                  {todo.status === "pending" ? "完成" : "重开"}
+                </Button>
               </div>
             ))}
-            <div ref={messagesEndRef} />
           </div>
-        )}
-      </section>
-
-      {/* Todo list at the bottom */}
-      {!replayMode && todos.length > 0 && (
-        <section
-          className="content-section"
-          style={{
-            borderTop: "1px solid #ddd",
-            paddingTop: "12px",
-            paddingBottom: "12px",
-            maxHeight: "200px",
-            overflowY: "auto",
-          }}
-        >
-          <h3 style={{ margin: "0 0 8px 0", fontSize: "15px" }}>
-            Todos ({todos.filter((t) => t.status === "pending").length} pending)
-          </h3>
-          {todos.map((todo) => (
-            <div
-              key={todo.id}
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                padding: "6px 0",
-                borderBottom: "1px solid #f0f0f0",
-                gap: "8px",
-              }}
-            >
-              <div
-                style={{
-                  flex: 1,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  minWidth: 0,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: "11px",
-                    padding: "1px 6px",
-                    borderRadius: "3px",
-                    fontWeight: 600,
-                    background: todo.status === "done" ? "#27ae60" : "#e67e22",
-                    color: "#fff",
-                    flexShrink: 0,
-                  }}
-                >
-                  {todo.status}
-                </span>
-                <span
-                  style={{
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    textDecoration:
-                      todo.status === "done" ? "line-through" : "none",
-                    color: todo.status === "done" ? "#999" : "inherit",
-                  }}
-                >
-                  {todo.title}
-                </span>
-              </div>
-              {todo.status === "pending" && (
-                <button
-                  className="btn btn-sm"
-                  style={{
-                    fontSize: "11px",
-                    padding: "2px 10px",
-                    background: "#27ae60",
-                    color: "#fff",
-                    border: "none",
-                    borderRadius: "4px",
-                    cursor: "pointer",
-                    flexShrink: 0,
-                  }}
-                  onClick={() => handleToggleTodoStatus(todo)}
-                >
-                  Done
-                </button>
-              )}
-              {todo.status === "done" && (
-                <button
-                  className="btn btn-sm"
-                  style={{
-                    fontSize: "11px",
-                    padding: "2px 10px",
-                    background: "#e67e22",
-                    color: "#fff",
-                    border: "none",
-                    borderRadius: "4px",
-                    cursor: "pointer",
-                    flexShrink: 0,
-                  }}
-                  onClick={() => handleToggleTodoStatus(todo)}
-                >
-                  Reopen
-                </button>
-              )}
-            </div>
-          ))}
-        </section>
+        </GlassCard>
       )}
 
-      {/* Message input form — hidden in replay mode */}
+      {/* Message Input */}
       {!replayMode && (
-        <section
-          className="content-section"
-          style={{
-            borderTop: "1px solid #ddd",
-            paddingTop: "12px",
-            paddingBottom: "12px",
-          }}
-        >
-          <form onSubmit={handleSend}>
+        <GlassCard className="shrink-0 !p-3 sm:!p-4 w-full">
+          <form onSubmit={handleSend} className="w-full">
             {sendError && (
-              <div className="alert alert-error">
-                <p>{sendError}</p>
+              <div className="px-3 py-2 rounded-md bg-danger-muted border border-danger/30 text-sm text-danger mb-3">
+                {sendError}
               </div>
             )}
-
-            <div style={{ display: "flex", gap: "8px" }}>
-              <input
-                type="text"
+            <div className="flex gap-2 w-full">
+              <Input
                 value={content}
                 onChange={(e) => setContent(e.target.value)}
-                placeholder="Type a message..."
-                className="form-control"
-                style={{ flex: 1 }}
+                placeholder="输入消息..."
+                className="flex-1 min-w-0"
                 disabled={sending}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend(e);
+                  }
+                }}
               />
-              <button
-                type="submit"
-                className="btn btn-primary"
-                disabled={sending || !content.trim()}
-              >
-                {sending ? "Sending..." : "Send"}
-              </button>
+              <Button type="submit" loading={sending} disabled={!content.trim()}>
+                发送
+              </Button>
             </div>
           </form>
-        </section>
+        </GlassCard>
       )}
-    </main>
+    </PageShell>
   );
 }

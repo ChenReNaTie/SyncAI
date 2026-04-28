@@ -6,6 +6,7 @@
  *   - Subscribe: { type: "subscribe", sessionId: "<uuid>" }
  *   - Inbound:  { type: "message.new", data: { message: Message } }
  *   - Inbound:  { type: "status.changed", data: { runtime_status: string } }
+ *   - Inbound:  { type: "stream.event", data: { sessionId, event: StreamEvent } }
  */
 
 import type { Message } from "./client.js";
@@ -30,7 +31,22 @@ export interface SocketStatusEvent {
   };
 }
 
-export type SocketEvent = SocketMessageEvent | SocketStatusEvent;
+/** A single stream event from the Codex agent. */
+export interface SocketStreamEvent {
+  type: "stream.event";
+  data: {
+    sessionId: string;
+    event: {
+      type: string;
+      data: Record<string, unknown>;
+    };
+  };
+}
+
+export type SocketEvent =
+  | SocketMessageEvent
+  | SocketStatusEvent
+  | SocketStreamEvent;
 
 export interface SessionSocket {
   /** Send a subscribe message for a given session. */
@@ -44,16 +60,40 @@ export function createSessionSocket(
   handlers: {
     onMessage: (msg: Message) => void;
     onStatusChanged: (status: string) => void;
+    onStreamEvent?: (event: SocketStreamEvent["data"]["event"]) => void;
     onError?: (error: Event) => void;
     onClose?: (event: CloseEvent) => void;
   },
+  /** If provided, the socket auto-subscribes to this session as soon as it opens. */
+  autoSubscribeSessionId?: string,
 ): SessionSocket {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  const url = `${protocol}://${window.location.host}/api/v1/ws?token=${encodeURIComponent(token)}`;
+  // In dev mode, connect through Vite proxy (which now has ws: true).
+  // In production, connect to the same host (Nginx or direct).
+  const wsHost = window.location.host;
+  const url = `${protocol}://${wsHost}/api/v1/ws?token=${encodeURIComponent(token)}`;
   const ws = new WebSocket(url);
 
+  // Track pending subscriptions that arrive before the socket opens.
+  const pendingSubscriptions: string[] = [];
+  if (autoSubscribeSessionId) {
+    pendingSubscriptions.push(autoSubscribeSessionId);
+  }
+
+  // Whether close() was called — used to avoid racing CONNECTING → OPEN.
+  let closed = false;
+
   ws.addEventListener("open", () => {
-    // connection established; subscriptions are sent by the caller
+    // If close() was called while the socket was CONNECTING, shut it down now.
+    if (closed) {
+      ws.close();
+      return;
+    }
+    // Flush any pending subscriptions.
+    for (const sid of pendingSubscriptions) {
+      ws.send(JSON.stringify({ type: "subscribe", sessionId: sid }));
+    }
+    pendingSubscriptions.length = 0;
   });
 
   ws.addEventListener("message", (event: MessageEvent) => {
@@ -75,6 +115,10 @@ export function createSessionSocket(
       if (payload.type === "status.changed" && payload.data?.runtime_status) {
         handlers.onStatusChanged(payload.data.runtime_status);
       }
+
+      if (payload.type === "stream.event" && payload.data?.event) {
+        handlers.onStreamEvent?.(payload.data.event);
+      }
     } catch {
       // ignore non-JSON frames
     }
@@ -92,15 +136,17 @@ export function createSessionSocket(
     subscribe(sessionId: string) {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "subscribe", sessionId }));
+      } else {
+        // Socket not open yet — queue for later delivery.
+        pendingSubscriptions.push(sessionId);
       }
     },
     close() {
-      if (
-        ws.readyState === WebSocket.OPEN ||
-        ws.readyState === WebSocket.CONNECTING
-      ) {
+      closed = true;
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CLOSING) {
         ws.close();
       }
+      // If still CONNECTING the open handler will close it.
     },
   };
 }
