@@ -334,3 +334,87 @@ export function searchMessages(
     { headers: { Authorization: `Bearer ${token}` } },
   );
 }
+
+// --- Replay ---
+
+export interface ReplayResponse {
+  data: Message[];
+}
+
+export function getReplay(
+  token: string,
+  sessionId: string,
+): Promise<ReplayResponse> {
+  return request<ReplayResponse>(`/sessions/${sessionId}/replay`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+// --- Todos ---
+
+export type TodoStatus = "pending" | "done";
+
+export interface Todo {
+  id: string;
+  session_id: string;
+  source_message_id: string;
+  title: string;
+  status: TodoStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TodosResponse {
+  data: Todo[];
+}
+
+export interface CreateTodoResponse {
+  data: Todo;
+}
+
+export interface UpdateTodoStatusResponse {
+  data: Todo;
+}
+
+export function getTodos(
+  token: string,
+  sessionId: string,
+): Promise<TodosResponse> {
+  return request<TodosResponse>(`/sessions/${sessionId}/todos`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export function createTodo(
+  token: string,
+  sessionId: string,
+  sourceMessageId: string,
+  title: string,
+): Promise<CreateTodoResponse> {
+  return request<CreateTodoResponse>(`/sessions/${sessionId}/todos`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      source_message_id: sourceMessageId,
+      title,
+    }),
+  });
+}
+
+export function updateTodoStatus(
+  token: string,
+  todoId: string,
+  status: TodoStatus,
+): Promise<UpdateTodoStatusResponse> {
+  return request<UpdateTodoStatusResponse>(`/todos/${todoId}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ status }),
+  });
+}
