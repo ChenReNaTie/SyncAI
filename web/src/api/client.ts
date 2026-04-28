@@ -70,6 +70,34 @@ export interface CreateProjectResponse {
   data: Project;
 }
 
+export interface Session {
+  id: string;
+  title: string;
+  visibility: "shared" | "private";
+  project_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SessionsResponse {
+  data: Session[];
+}
+
+export interface CreateSessionRequest {
+  title: string;
+  visibility: "shared" | "private";
+}
+
+export interface CreateSessionResponse {
+  data: Session;
+}
+
+export interface SessionsParams {
+  visibility?: "shared" | "private";
+  limit?: number;
+  cursor?: string;
+}
+
 async function request<T>(
   path: string,
   options: RequestInit = {},
@@ -174,5 +202,37 @@ export function createProject(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ name, description }),
+  });
+}
+
+export function getSessions(
+  token: string,
+  projectId: string,
+  params?: SessionsParams,
+): Promise<SessionsResponse> {
+  const query = new URLSearchParams();
+  if (params?.visibility) query.set("visibility", params.visibility);
+  if (params?.limit) query.set("limit", String(params.limit));
+  if (params?.cursor) query.set("cursor", params.cursor);
+  const qs = query.toString();
+  return request<SessionsResponse>(
+    `/projects/${projectId}/sessions${qs ? `?${qs}` : ""}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+}
+
+export function createSession(
+  token: string,
+  projectId: string,
+  title: string,
+  visibility: "shared" | "private",
+): Promise<CreateSessionResponse> {
+  return request<CreateSessionResponse>(`/projects/${projectId}/sessions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ title, visibility }),
   });
 }

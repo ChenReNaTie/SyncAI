@@ -199,7 +199,9 @@ export function TeamPage() {
           <ul className="team-grid">
             {projects.map((project) => (
               <li key={project.id} className="card">
-                <h4>{project.name}</h4>
+                <h4>
+                  <Link to={`/projects/${project.id}`}>{project.name}</Link>
+                </h4>
                 {project.description && <p>{project.description}</p>}
                 <small>
                   Created: {new Date(project.created_at).toLocaleDateString()}
