@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import { LoginPage } from "./pages/LoginPage.js";
 import { DashboardPage } from "./pages/DashboardPage.js";
+import { TeamPage } from "./pages/TeamPage.js";
 
 function RootRedirect() {
   const token = localStorage.getItem("token");
@@ -15,6 +16,7 @@ export function App() {
       <Route path="/" element={<RootRedirect />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/dashboard" element={<DashboardPage />} />
+      <Route path="/teams/:teamId" element={<TeamPage />} />
     </Routes>
   );
 }

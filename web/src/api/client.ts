@@ -38,6 +38,38 @@ export interface CreateTeamResponse {
   data: Team;
 }
 
+export interface TeamDetail {
+  id: string;
+  name: string;
+  slug: string;
+  created_at: string;
+}
+
+export interface TeamDetailResponse {
+  data: TeamDetail;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  description: string;
+  team_id: string;
+  created_at: string;
+}
+
+export interface ProjectsResponse {
+  data: Project[];
+}
+
+export interface CreateProjectRequest {
+  name: string;
+  description: string;
+}
+
+export interface CreateProjectResponse {
+  data: Project;
+}
+
 async function request<T>(
   path: string,
   options: RequestInit = {},
@@ -108,5 +140,39 @@ export function createTeam(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(teamData),
+  });
+}
+
+export function getTeam(
+  token: string,
+  teamId: string,
+): Promise<TeamDetailResponse> {
+  return request<TeamDetailResponse>(`/teams/${teamId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export function getProjects(
+  token: string,
+  teamId: string,
+): Promise<ProjectsResponse> {
+  return request<ProjectsResponse>(`/teams/${teamId}/projects`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export function createProject(
+  token: string,
+  teamId: string,
+  name: string,
+  description: string,
+): Promise<CreateProjectResponse> {
+  return request<CreateProjectResponse>(`/teams/${teamId}/projects`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name, description }),
   });
 }

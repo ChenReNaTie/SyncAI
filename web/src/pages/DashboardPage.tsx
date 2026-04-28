@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 
 interface Team {
   id: string;
@@ -159,7 +159,9 @@ export function DashboardPage() {
             <ul className="team-grid">
               {teams.map((team) => (
                 <li key={team.id} className="card">
-                  <h3>{team.name}</h3>
+                  <h3>
+                    <Link to={`/teams/${team.id}`}>{team.name}</Link>
+                  </h3>
                   <p><strong>Slug:</strong> {team.slug}</p>
                   <p><strong>ID:</strong> {team.id}</p>
                   <small>Created: {new Date(team.created_at).toLocaleDateString()}</small>
