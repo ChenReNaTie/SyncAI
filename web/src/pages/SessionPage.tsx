@@ -392,7 +392,7 @@ export function SessionPage() {
       // Clear previous stream events for the new round
       setStreamEvents([]);
       const res = await sendMessage(token!, sessionId!, trimmed);
-      setMessages((prev) => [...prev, res.data.message]);
+      setMessages((prev) => prev.some((m) => m.id === res.data.message.id) ? prev : [...prev, res.data.message]);
       setContent("");
     } catch (err: any) {
       setSendError(err.message || "Failed to send message");
