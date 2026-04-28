@@ -1,5 +1,6 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import { LoginPage } from "./pages/LoginPage.js";
+import { DashboardPage } from "./pages/DashboardPage.js";
 
 function RootRedirect() {
   const token = localStorage.getItem("token");
@@ -8,22 +9,12 @@ function RootRedirect() {
     : <Navigate to="/login" replace />;
 }
 
-function DashboardPlaceholder() {
-  return (
-    <main className="page-shell">
-      <section className="hero">
-        <h1>Dashboard - 登录成功</h1>
-      </section>
-    </main>
-  );
-}
-
 export function App() {
   return (
     <Routes>
       <Route path="/" element={<RootRedirect />} />
       <Route path="/login" element={<LoginPage />} />
-      <Route path="/dashboard" element={<DashboardPlaceholder />} />
+      <Route path="/dashboard" element={<DashboardPage />} />
     </Routes>
   );
 }

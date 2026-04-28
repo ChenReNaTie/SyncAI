@@ -18,6 +18,26 @@ export interface MeResponse {
   data: AuthUser;
 }
 
+export interface Team {
+  id: string;
+  name: string;
+  slug: string;
+  created_at: string;
+}
+
+export interface TeamsResponse {
+  data: Team[];
+}
+
+export interface CreateTeamRequest {
+  name: string;
+  slug: string;
+}
+
+export interface CreateTeamResponse {
+  data: Team;
+}
+
 async function request<T>(
   path: string,
   options: RequestInit = {},
@@ -68,5 +88,25 @@ export function login(
 export function getMe(token: string): Promise<MeResponse> {
   return request<MeResponse>("/auth/me", {
     headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export function getTeams(token: string): Promise<TeamsResponse> {
+  return request<TeamsResponse>("/teams", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export function createTeam(
+  token: string,
+  teamData: CreateTeamRequest
+): Promise<CreateTeamResponse> {
+  return request<CreateTeamResponse>("/teams", {
+    method: "POST",
+    headers: { 
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(teamData),
   });
 }
