@@ -9,6 +9,7 @@ import {
   createTodo,
   updateTodoStatus,
 } from "../api/client.js";
+import { createSessionSocket } from "../api/socket.js";
 import type {
   SessionDetail,
   Message,
@@ -46,6 +47,7 @@ export function SessionPage() {
   const [todoError, setTodoError] = useState<string | null>(null);
 
   const token = localStorage.getItem("token");
+  const socketRef = useRef<ReturnType<typeof createSessionSocket> | null>(null);
 
   useEffect(() => {
     if (!token) {
@@ -60,6 +62,34 @@ export function SessionPage() {
     loadMessages();
     loadTodos();
   }, [sessionId, token, navigate]);
+
+  // WebSocket: connect on mount, disconnect on unmount
+  useEffect(() => {
+    if (!token || !sessionId) return;
+
+    const socket = createSessionSocket(token, {
+      onMessage(msg: Message) {
+        setMessages((prev) => {
+          // dedup by message id
+          if (prev.some((m) => m.id === msg.id)) return prev;
+          return [...prev, msg];
+        });
+      },
+      onStatusChanged(status: string) {
+        setSession((prev) =>
+          prev ? { ...prev, runtime_status: status } : prev,
+        );
+      },
+    });
+
+    socket.subscribe(sessionId);
+    socketRef.current = socket;
+
+    return () => {
+      socket.close();
+      socketRef.current = null;
+    };
+  }, [token, sessionId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
