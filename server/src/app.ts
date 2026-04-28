@@ -11,6 +11,7 @@ import { registerAuthRoutes } from "./routes/auth.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerTeamRoutes } from "./routes/teams.js";
 import { registerWorkspaceRoutes } from "./routes/workspace.js";
+import { registerWsRoute } from "./routes/ws.js";
 
 export async function buildApp() {
   const env = loadEnv();
@@ -53,6 +54,8 @@ export async function buildApp() {
     await registerTeamRoutes(api);
     await registerWorkspaceRoutes(api);
   }, { prefix: "/api/v1" });
+
+  registerWsRoute(app);
 
   return { app, env };
 }

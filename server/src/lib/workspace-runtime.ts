@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import type { SessionRuntimeStatus } from "@syncai/shared";
 import type { Pool } from "pg";
 import {
@@ -29,6 +30,25 @@ export interface WorkspaceRuntime {
   scheduleSession(sessionId: string): void;
   waitForSession(sessionId: string): Promise<void>;
   close(): Promise<void>;
+  on(event: string, listener: (...args: any[]) => void): this;
+  off(event: string, listener: (...args: any[]) => void): this;
+  emit(event: string, ...args: any[]): boolean;
+}
+
+export interface WsMessageEvent {
+  sessionId: string;
+  message: {
+    id: string;
+    content: string;
+    sender: string;
+    session_id: string;
+    created_at: string;
+  };
+}
+
+export interface WsStatusEvent {
+  sessionId: string;
+  runtimeStatus: string;
 }
 
 export function createWorkspaceRuntime(options: {
@@ -43,6 +63,7 @@ export function createWorkspaceRuntime(options: {
           latencyMs: options.mockLatencyMs,
         },
   );
+  const emitter = new EventEmitter();
   const activeSessions = new Map<string, Promise<void>>();
 
   async function claimNextMessage(
@@ -180,11 +201,25 @@ export function createWorkspaceRuntime(options: {
         [message.sessionId, result.finalReply, nextSequence],
       );
 
+      const agentMessageRow = agentMessageResult.rows[0];
+      const agentMessageId = String(agentMessageRow.id);
+
       await appendCommandSummaryEvent(client, {
         sessionId: message.sessionId,
         messageId: message.messageId,
         summary: result.summary,
-        agentMessageId: String(agentMessageResult.rows[0].id),
+        agentMessageId,
+      });
+
+      emitter.emit("message.new", {
+        sessionId: message.sessionId,
+        message: {
+          id: agentMessageId,
+          content: result.finalReply,
+          sender: "agent",
+          session_id: message.sessionId,
+          created_at: new Date().toISOString(),
+        },
       });
 
       const remainingResult = await client.query(
@@ -214,6 +249,11 @@ export function createWorkspaceRuntime(options: {
         relatedMessageId: message.messageId,
         from: "running",
         to: nextRuntimeStatus,
+      });
+
+      emitter.emit("status.changed", {
+        sessionId: message.sessionId,
+        runtimeStatus: nextRuntimeStatus,
       });
 
       await client.query("COMMIT");
@@ -276,6 +316,11 @@ export function createWorkspaceRuntime(options: {
         errorSummary,
       });
 
+      emitter.emit("status.changed", {
+        sessionId: message.sessionId,
+        runtimeStatus: "error",
+      });
+
       await client.query("COMMIT");
     } catch (commitError) {
       await client.query("ROLLBACK");
@@ -311,12 +356,12 @@ export function createWorkspaceRuntime(options: {
     }
   }
 
-  return {
-    ensureSessionBinding(input) {
+  const runtime: WorkspaceRuntime = {
+    ensureSessionBinding(input: StartSessionInput) {
       return adapter.startSession(input);
     },
 
-    scheduleSession(sessionId) {
+    scheduleSession(sessionId: string) {
       if (activeSessions.has(sessionId)) {
         return;
       }
@@ -337,12 +382,28 @@ export function createWorkspaceRuntime(options: {
       activeSessions.set(sessionId, task);
     },
 
-    async waitForSession(sessionId) {
+    async waitForSession(sessionId: string) {
       await (activeSessions.get(sessionId) ?? Promise.resolve());
     },
 
     async close() {
       await Promise.allSettled([...activeSessions.values()]);
     },
+
+    on(event: string, listener: (...args: any[]) => void) {
+      emitter.on(event, listener);
+      return runtime;
+    },
+
+    off(event: string, listener: (...args: any[]) => void) {
+      emitter.off(event, listener);
+      return runtime;
+    },
+
+    emit(event: string, ...args: any[]): boolean {
+      return emitter.emit(event, ...args);
+    },
   };
+
+  return runtime;
 }
