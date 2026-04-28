@@ -438,6 +438,50 @@ export async function registerTeamRoutes(
     });
   });
 
+  app.get("/teams/:teamId/members", async (request, reply) => {
+    const params = teamParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return sendValidationError(reply, params.error);
+    }
+
+    const access = await requireTeamAccess(
+      app,
+      request,
+      reply,
+      params.data.teamId,
+    );
+    if (!access) {
+      return;
+    }
+
+    const result = await app.db.query(
+      `SELECT
+         tm.user_id,
+         u.email,
+         u.display_name,
+         tm.role,
+         tm.joined_at,
+         (t.created_by = tm.user_id) AS is_creator
+       FROM team_members tm
+       JOIN users u ON u.id = tm.user_id
+       JOIN teams t ON t.id = tm.team_id
+       WHERE tm.team_id = $1
+       ORDER BY tm.joined_at ASC`,
+      [params.data.teamId],
+    );
+
+    return reply.code(200).send({
+      data: result.rows.map((row) => ({
+        user_id: row.user_id,
+        email: row.email,
+        display_name: row.display_name,
+        role: row.role,
+        is_creator: Boolean(row.is_creator),
+        joined_at: asIso(row.joined_at),
+      })),
+    });
+  });
+
   app.post("/teams/:teamId/members", async (request, reply) => {
     const params = teamParamsSchema.safeParse(request.params);
     if (!params.success) {

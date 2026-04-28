@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { getTeam, getProjects, createProject, getAgentNode, upsertAgentNode, addTeamMember, type AgentNode } from "../api/client.js";
+import { getTeam, getProjects, createProject, getAgentNode, upsertAgentNode, addTeamMember, getTeamMembers, type AgentNode, type TeamMember } from "../api/client.js";
 import { PageShell, GlassCard, Button, Input, Badge, PageLoading } from "../components/index.js";
 
 interface TeamDetail {
@@ -35,6 +35,10 @@ export function TeamPage() {
   const [nodeDisplayName, setNodeDisplayName] = useState("");
   const [nodeConfiguring, setNodeConfiguring] = useState(false);
 
+  // Members list state
+  const [members, setMembers] = useState<TeamMember[]>([]);
+  const [membersLoading, setMembersLoading] = useState(false);
+
   // Invite member state
   const [showInviteForm, setShowInviteForm] = useState(false);
   const [inviteEmail, setInviteEmail] = useState("");
@@ -68,6 +72,17 @@ export function TeamPage() {
       ]);
       setTeam(teamRes.data);
       setProjects(projectsRes.data);
+
+      // Load members
+      try {
+        setMembersLoading(true);
+        const membersRes = await getTeamMembers(token!, teamId!);
+        setMembers(membersRes.data);
+      } catch {
+        // members list is best-effort
+      } finally {
+        setMembersLoading(false);
+      }
 
       // Load agent node (best effort, 404 is expected)
       try {
@@ -132,6 +147,18 @@ export function TeamPage() {
     }
   };
 
+  const loadMembers = async () => {
+    try {
+      setMembersLoading(true);
+      const membersRes = await getTeamMembers(token!, teamId!);
+      setMembers(membersRes.data);
+    } catch {
+      // ignore
+    } finally {
+      setMembersLoading(false);
+    }
+  };
+
   const handleInviteMember = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inviteEmail.trim()) {
@@ -146,6 +173,8 @@ export function TeamPage() {
       setInviteSuccess(`已成功邀请 ${inviteEmail.trim()}（角色：${inviteRole === "admin" ? "管理员" : "成员"}）`);
       setInviteEmail("");
       setInviteRole("member");
+      // Refresh member list
+      loadMembers();
     } catch (err: any) {
       setInviteError(err.message || "邀请失败");
     } finally {
@@ -235,6 +264,50 @@ export function TeamPage() {
                 </Button>
               </div>
             </form>
+          )}
+        </div>
+
+        {/* Team Members List */}
+        <div className="mt-4 pt-4 border-t border-glass-border">
+          <h4 className="text-sm font-semibold text-text-primary mb-3">团队成员</h4>
+          {membersLoading ? (
+            <p className="text-xs text-text-muted">加载中...</p>
+          ) : members.length === 0 ? (
+            <p className="text-xs text-text-muted">暂无成员</p>
+          ) : (
+            <ul className="space-y-2">
+              {members.map((m) => (
+                <li
+                  key={m.user_id}
+                  className="flex items-center gap-3 px-3 py-2 rounded-lg bg-surface-2 border border-glass-border"
+                >
+                  <span className="flex-shrink-0 w-8 h-8 rounded-full bg-glass-border flex items-center justify-center text-xs text-text-secondary font-medium">
+                    {(m.display_name || m.email)[0].toUpperCase()}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <span className="text-sm text-text-primary truncate block">
+                      {m.display_name || m.email}
+                    </span>
+                    {m.display_name && (
+                      <span className="text-xs text-text-muted truncate block">
+                        {m.email}
+                      </span>
+                    )}
+                  </div>
+                  <span
+                    className={`flex-shrink-0 px-2 py-0.5 rounded-full text-xs font-medium ${
+                      m.is_creator
+                        ? "bg-accent/30 text-accent-light border border-accent/50"
+                        : m.role === "admin"
+                        ? "bg-accent/20 text-accent-light border border-accent/30"
+                        : "bg-glass-border/40 text-text-muted border border-glass-border"
+                    }`}
+                  >
+                    {m.is_creator ? "团长" : m.role === "admin" ? "管理员" : "成员"}
+                  </span>
+                </li>
+              ))}
+            </ul>
           )}
         </div>
 

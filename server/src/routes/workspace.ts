@@ -1234,6 +1234,10 @@ export async function registerWorkspaceRoutes(
       }
 
       await client.query("COMMIT");
+      app.workspaceRuntime.emit("message.new", {
+        sessionId: params.data.sessionId,
+        message: serializeMessage(messageResult.rows[0]),
+      });
       app.workspaceRuntime.scheduleSession(params.data.sessionId);
 
       return reply.code(201).send({

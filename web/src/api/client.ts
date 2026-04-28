@@ -376,7 +376,7 @@ export function sendMessage(
 
 // --- Team Members ---
 
-export interface TeamMember {
+export interface AddTeamMember {
   team_id: string;
   user_id: string;
   role: "admin" | "member";
@@ -385,7 +385,20 @@ export interface TeamMember {
 }
 
 export interface AddTeamMemberResponse {
-  data: TeamMember;
+  data: AddTeamMember;
+}
+
+export interface TeamMember {
+  user_id: string;
+  email: string;
+  display_name: string;
+  role: "admin" | "member";
+  is_creator?: boolean;
+  joined_at: string;
+}
+
+export interface TeamMembersResponse {
+  data: TeamMember[];
 }
 
 export function addTeamMember(
@@ -401,6 +414,15 @@ export function addTeamMember(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ email, role }),
+  });
+}
+
+export function getTeamMembers(
+  token: string,
+  teamId: string,
+): Promise<TeamMembersResponse> {
+  return request<TeamMembersResponse>(`/teams/${teamId}/members`, {
+    headers: { Authorization: `Bearer ${token}` },
   });
 }
 
