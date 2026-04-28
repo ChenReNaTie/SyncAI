@@ -7,7 +7,9 @@ import {
   createWorkspaceRuntime,
   type WorkspaceRuntime,
 } from "./lib/workspace-runtime.js";
+import { registerAuthRoutes } from "./routes/auth.js";
 import { registerHealthRoutes } from "./routes/health.js";
+import { registerTeamRoutes } from "./routes/teams.js";
 import { registerWorkspaceRoutes } from "./routes/workspace.js";
 
 export async function buildApp() {
@@ -28,6 +30,10 @@ export async function buildApp() {
     appName: env.appName,
     databaseUrl: env.databaseUrl,
     redisUrl: env.redisUrl,
+    authAccessSecret: env.authAccessSecret,
+    authRefreshSecret: env.authRefreshSecret,
+    authAccessTtlSeconds: env.authAccessTtlSeconds,
+    authRefreshTtlSeconds: env.authRefreshTtlSeconds,
   });
   app.decorate("db", db);
   app.decorate("workspaceRuntime", workspaceRuntime);
@@ -43,6 +49,8 @@ export async function buildApp() {
 
   await app.register(async (api) => {
     await registerHealthRoutes(api);
+    await registerAuthRoutes(api);
+    await registerTeamRoutes(api);
     await registerWorkspaceRoutes(api);
   }, { prefix: "/api/v1" });
 
@@ -55,6 +63,10 @@ declare module "fastify" {
       appName: string;
       databaseUrl: string;
       redisUrl: string;
+      authAccessSecret: string;
+      authRefreshSecret: string;
+      authAccessTtlSeconds: number;
+      authRefreshTtlSeconds: number;
     };
     db: Pool;
     workspaceRuntime: WorkspaceRuntime;

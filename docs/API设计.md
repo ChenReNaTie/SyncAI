@@ -29,6 +29,7 @@
 - HTTP Base Path：`/api/v1`
 - 数据格式：`application/json; charset=utf-8`
 - 认证方式：`Authorization: Bearer <token>`
+- 在当前开发 / 测试阶段，可由鉴权层或测试注入 `Authorization: Bearer <user_uuid>`，也可临时注入 `x-syncai-user-id` 代表“已完成鉴权的当前用户”；业务路由不得回退到 `creator_id` / `created_by` 冒充当前用户。
 - ID 类型：统一使用 `uuid`
 - 时间格式：统一使用 ISO 8601 UTC 字符串
 
@@ -64,6 +65,8 @@
 ### 2.4 幂等规则
 
 发送成员消息时，客户端应传 `client_message_id`，服务端按 `(session_id, client_message_id)` 去重，避免断线重试生成重复消息。
+
+若客户端因超时或断线重试再次提交相同 `client_message_id`，服务端返回已存在成员消息的幂等回放结果，不再重复写入消息、队列或事件。
 
 ---
 
@@ -389,6 +392,14 @@
 }
 ```
 
+重复提交相同 `(session_id, client_message_id)` 时：
+
+- 返回 `200`
+- `data.message` 为第一次成功写入的成员消息
+- `data.duplicated = true`
+- `data.idempotent_replay = true`
+- 不重复写入 `messages`、`session_events` 或新的执行队列项
+
 约束：
 
 - 成员消息必须先落库，再触发调度
@@ -662,7 +673,6 @@ interface AgentAdapter {
 | `SESSION_NOT_VISIBLE` | 当前用户无权查看会话 |
 | `NODE_NOT_CONFIGURED` | 团队未配置 Codex 节点 |
 | `NODE_UNAVAILABLE` | 当前节点不可用 |
-| `MESSAGE_DUPLICATED` | `client_message_id` 重复 |
 | `INVALID_VISIBILITY` | 非法可见性切换 |
 | `INVALID_TODO_STATUS` | 非法 todo 状态 |
 

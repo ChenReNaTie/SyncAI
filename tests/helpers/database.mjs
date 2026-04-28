@@ -162,10 +162,31 @@ export async function insertMessage(client, input) {
        sequence_no,
        client_message_id,
        error_summary,
-       metadata
-     )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, '{}'::jsonb))
-     RETURNING id, sender_type, processing_status, is_final_reply, client_message_id, error_summary`,
+       metadata,
+       created_at,
+       updated_at
+      )
+      VALUES (
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6,
+        $7,
+        $8,
+        $9,
+        COALESCE($10, '{}'::jsonb),
+        COALESCE($11, now()),
+        COALESCE($11, now())
+      )
+      RETURNING
+        id,
+        sender_type,
+        processing_status,
+        is_final_reply,
+        client_message_id,
+        error_summary`,
     [
       input.sessionId,
       input.senderType,
@@ -177,10 +198,52 @@ export async function insertMessage(client, input) {
       input.clientMessageId ?? null,
       input.errorSummary ?? null,
       input.metadata ?? null,
+      input.createdAt ?? null,
     ],
   );
 
   return message;
+}
+
+export async function createPersistedSessionContext(overrides = {}) {
+  const client = await getPool().connect();
+
+  try {
+    return await seedSessionContext(client, overrides);
+  } finally {
+    client.release();
+  }
+}
+
+export async function cleanupPersistedSessionContext(
+  context,
+  options = {},
+) {
+  const userIds = [...new Set([
+    context.ownerId,
+    context.memberId,
+    ...(options.extraUserIds ?? []),
+  ])];
+
+  await getPool().query(
+    `DELETE FROM projects
+     WHERE team_id = $1`,
+    [context.teamId],
+  );
+  await getPool().query(
+    `DELETE FROM team_agent_nodes
+     WHERE team_id = $1`,
+    [context.teamId],
+  );
+  await getPool().query(`DELETE FROM teams WHERE id = $1`, [context.teamId]);
+
+  if (userIds.length > 0) {
+    await getPool().query(
+      `DELETE FROM users
+       WHERE id = ANY($1::uuid[])`,
+      [userIds],
+    );
+  }
 }
 
 export async function withRollbackTransaction(callback) {

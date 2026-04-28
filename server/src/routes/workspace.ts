@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   AGENT_TYPE,
   sessionVisibilityValues,
@@ -10,6 +10,7 @@ import {
   appendMessageQueuedEvent,
   appendStatusChangedEvent,
 } from "../lib/session-events.js";
+import { verifyAccessToken } from "../lib/auth.js";
 
 const sessionCreateSchema = z.object({
   title: z.string().trim().min(1).max(200),
@@ -18,6 +19,7 @@ const sessionCreateSchema = z.object({
 
 const sessionListQuerySchema = z.object({
   visibility: z.enum(sessionVisibilityValues).optional(),
+  cursor: z.string().trim().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });
 
@@ -33,6 +35,7 @@ const messageCreateSchema = z.object({
 const searchQuerySchema = z.object({
   q: z.string().trim().min(1),
   project_id: z.string().uuid().optional(),
+  cursor: z.string().trim().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });
 
@@ -43,6 +46,30 @@ const todoCreateSchema = z.object({
 
 const todoPatchSchema = z.object({
   status: z.enum(todoStatusValues),
+});
+
+const actorHeaderSchema = z.string().uuid();
+const optionalCursorProjectIdSchema = z.union([z.string().uuid(), z.literal("")]);
+const optionalCursorVisibilitySchema = z.union([
+  z.enum(sessionVisibilityValues),
+  z.literal(""),
+]);
+
+const sessionCursorSchema = z.object({
+  sort_at: z.string().datetime({ offset: true }),
+  session_id: z.string().uuid(),
+  project_id: z.string().uuid(),
+  actor_user_id: z.string().uuid(),
+  visibility: optionalCursorVisibilitySchema,
+});
+
+const searchCursorSchema = z.object({
+  occurred_at: z.string().datetime({ offset: true }),
+  message_id: z.string().uuid(),
+  team_id: z.string().uuid(),
+  actor_user_id: z.string().uuid(),
+  project_id: optionalCursorProjectIdSchema,
+  q: z.string(),
 });
 
 function asIso(value: unknown) {
@@ -58,6 +85,159 @@ function sendValidationError(reply: FastifyReply, error: z.ZodError) {
     code: "INVALID_REQUEST",
     details: error.flatten(),
   });
+}
+
+function sendInvalidCursor(reply: FastifyReply) {
+  return reply.code(400).send({
+    code: "INVALID_REQUEST",
+    details: {
+      formErrors: [],
+      fieldErrors: {
+        cursor: ["Invalid cursor"],
+      },
+    },
+  });
+}
+
+function sendAuthRequired(reply: FastifyReply) {
+  return reply.code(401).send({
+    code: "AUTH_REQUIRED",
+  });
+}
+
+function getSingleHeaderValue(
+  value: string | string[] | undefined,
+): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function getAuthorizationBearerToken(request: FastifyRequest) {
+  const authorization = getSingleHeaderValue(request.headers.authorization);
+  if (!authorization) {
+    return null;
+  }
+
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  if (!match || !match[1]) {
+    return "";
+  }
+
+  return match[1].trim();
+}
+
+function requireActorUserId(
+  request: FastifyRequest,
+  reply: FastifyReply,
+) {
+  const bearerToken = getAuthorizationBearerToken(request);
+  if (bearerToken !== null) {
+    const token = verifyAccessToken(
+      bearerToken,
+      request.server.config.authAccessSecret,
+    );
+    if (token) {
+      return token.userId;
+    }
+
+    const legacyBearerActor = actorHeaderSchema.safeParse(bearerToken);
+    if (legacyBearerActor.success) {
+      return legacyBearerActor.data;
+    }
+
+    sendAuthRequired(reply);
+    return null;
+  }
+
+  const actorHeader =
+    getSingleHeaderValue(request.headers["x-syncai-user-id"]) ??
+    getSingleHeaderValue(request.headers["x-user-id"]);
+
+  if (!actorHeader) {
+    sendAuthRequired(reply);
+    return null;
+  }
+
+  const actorUserId = actorHeaderSchema.safeParse(actorHeader);
+  if (!actorUserId.success) {
+    sendAuthRequired(reply);
+    return null;
+  }
+
+  return actorUserId.data;
+}
+
+function encodeCursor(payload: Record<string, string>) {
+  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+}
+
+function toCursorScopeValue(value: string | undefined) {
+  return value ?? "";
+}
+
+function decodeCursor<T>(
+  cursor: string,
+  schema: z.ZodType<T>,
+): T | null {
+  try {
+    const payload = JSON.parse(
+      Buffer.from(cursor, "base64url").toString("utf8"),
+    );
+    const result = schema.safeParse(payload);
+    return result.success ? result.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildCursorResponse<T>(data: T[], nextCursor: string | null) {
+  return {
+    data,
+    meta: {
+      next_cursor: nextCursor,
+    },
+  };
+}
+
+function hasSessionVisibility(
+  session: Record<string, unknown>,
+  actorUserId: string,
+) {
+  return (
+    session.visibility === "shared" ||
+    String(session.creator_id) === actorUserId
+  );
+}
+
+function hasMatchingSessionCursorScope(
+  cursor: z.infer<typeof sessionCursorSchema>,
+  input: {
+    projectId: string;
+    actorUserId: string;
+    visibility?: string | undefined;
+  },
+) {
+  return (
+    cursor.project_id === input.projectId &&
+    cursor.actor_user_id === input.actorUserId &&
+    cursor.visibility === toCursorScopeValue(input.visibility)
+  );
+}
+
+function hasMatchingSearchCursorScope(
+  cursor: z.infer<typeof searchCursorSchema>,
+  input: {
+    teamId: string;
+    actorUserId: string;
+    projectId?: string | undefined;
+    q: string;
+  },
+) {
+  return (
+    cursor.team_id === input.teamId &&
+    cursor.actor_user_id === input.actorUserId &&
+    cursor.project_id === toCursorScopeValue(input.projectId) &&
+    cursor.q === input.q
+  );
 }
 
 function serializeSession(row: Record<string, unknown>) {
@@ -141,9 +321,11 @@ async function loadSessionDetail(app: FastifyInstance, sessionId: string) {
          WHERE m.processing_status IN ('accepted', 'queued', 'running')
        )::int AS pending_count
      FROM sessions s
+     JOIN projects p ON p.id = s.project_id
      LEFT JOIN messages m ON m.session_id = s.id
      WHERE s.id = $1
        AND s.archived_at IS NULL
+       AND p.archived_at IS NULL
      GROUP BY s.id`,
     [sessionId],
   );
@@ -179,6 +361,19 @@ async function loadProjectContext(app: FastifyInstance, projectId: string) {
   return result.rows[0];
 }
 
+async function loadTeamContext(app: FastifyInstance, teamId: string) {
+  const result = await app.db.query(
+    `SELECT
+       id,
+       created_by
+     FROM teams
+     WHERE id = $1`,
+    [teamId],
+  );
+
+  return result.rows[0];
+}
+
 async function loadSessionContext(app: FastifyInstance, sessionId: string) {
   const result = await app.db.query(
     `SELECT
@@ -195,11 +390,129 @@ async function loadSessionContext(app: FastifyInstance, sessionId: string) {
      FROM sessions s
      JOIN projects p ON p.id = s.project_id
      WHERE s.id = $1
-       AND s.archived_at IS NULL`,
+       AND s.archived_at IS NULL
+       AND p.archived_at IS NULL`,
     [sessionId],
   );
 
   return result.rows[0];
+}
+
+async function loadTodoContext(app: FastifyInstance, todoId: string) {
+  const result = await app.db.query(
+    `SELECT
+       t.id,
+       t.session_id,
+       s.creator_id,
+       s.visibility,
+       p.team_id
+     FROM todos t
+     JOIN sessions s ON s.id = t.session_id
+     JOIN projects p ON p.id = s.project_id
+     WHERE t.id = $1
+       AND s.archived_at IS NULL
+       AND p.archived_at IS NULL`,
+    [todoId],
+  );
+
+  return result.rows[0];
+}
+
+async function isTeamMember(
+  app: FastifyInstance,
+  teamId: string,
+  userId: string,
+) {
+  const result = await app.db.query(
+    `SELECT 1
+     FROM team_members
+     WHERE team_id = $1
+       AND user_id = $2
+     LIMIT 1`,
+    [teamId, userId],
+  );
+
+  return Boolean(result.rows[0]);
+}
+
+async function requireProjectMember(
+  app: FastifyInstance,
+  request: FastifyRequest,
+  reply: FastifyReply,
+  project: Record<string, unknown>,
+) {
+  const actorUserId = requireActorUserId(request, reply);
+  if (!actorUserId) {
+    return null;
+  }
+
+  const member = await isTeamMember(app, String(project.team_id), actorUserId);
+  if (!member) {
+    reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    return null;
+  }
+
+  return actorUserId;
+}
+
+async function requireTeamMember(
+  app: FastifyInstance,
+  request: FastifyRequest,
+  reply: FastifyReply,
+  team: Record<string, unknown>,
+) {
+  const actorUserId = requireActorUserId(request, reply);
+  if (!actorUserId) {
+    return null;
+  }
+
+  const member = await isTeamMember(app, String(team.id), actorUserId);
+  if (!member) {
+    reply.code(404).send({ code: "TEAM_NOT_FOUND" });
+    return null;
+  }
+
+  return actorUserId;
+}
+
+async function requireVisibleSession(
+  app: FastifyInstance,
+  request: FastifyRequest,
+  reply: FastifyReply,
+  sessionId: string,
+  options: {
+    requireCreator?: boolean;
+  } = {},
+) {
+  const session = await loadSessionContext(app, sessionId);
+  if (!session) {
+    reply.code(404).send({ code: "SESSION_NOT_FOUND" });
+    return null;
+  }
+
+  const actorUserId = requireActorUserId(request, reply);
+  if (!actorUserId) {
+    return null;
+  }
+
+  const member = await isTeamMember(app, String(session.team_id), actorUserId);
+  if (!member || !hasSessionVisibility(session, actorUserId)) {
+    reply.code(403).send({ code: "SESSION_NOT_VISIBLE" });
+    return null;
+  }
+
+  if (
+    options.requireCreator &&
+    String(session.creator_id) !== actorUserId
+  ) {
+    reply.code(403).send({ code: "SESSION_FORBIDDEN" });
+    return null;
+  }
+
+  return {
+    session,
+    actorUserId,
+  };
 }
 
 async function loadVisibleScopeSnapshot(app: FastifyInstance, teamId: string) {
@@ -224,6 +537,25 @@ async function loadVisibleScopeSnapshot(app: FastifyInstance, teamId: string) {
   return result.rows[0]?.snapshot ?? [];
 }
 
+async function loadSharedStartedAt(
+  app: FastifyInstance,
+  sessionId: string,
+  sessionCreatedAt: unknown,
+) {
+  const result = await app.db.query(
+    `SELECT shared_started_at
+     FROM session_audit_logs
+     WHERE session_id = $1
+       AND new_visibility = 'shared'
+       AND shared_started_at IS NOT NULL
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [sessionId],
+  );
+
+  return result.rows[0]?.shared_started_at ?? sessionCreatedAt;
+}
+
 function mapReplayEvent(row: Record<string, unknown>) {
   const payload =
     row.payload && typeof row.payload === "object"
@@ -235,7 +567,6 @@ function mapReplayEvent(row: Record<string, unknown>) {
       entry_type: "command_summary",
       occurred_at: asIso(row.occurred_at),
       summary: row.summary,
-      payload,
     };
   }
 
@@ -254,12 +585,16 @@ function mapReplayEvent(row: Record<string, unknown>) {
     };
   }
 
+  if (row.event_type !== "status.changed") {
+    return null;
+  }
+
   return {
     entry_type: "status_changed",
     occurred_at: asIso(row.occurred_at),
+    from: payload.from ?? null,
+    to: payload.to ?? null,
     summary: row.summary,
-    event_type: row.event_type,
-    payload,
   };
 }
 
@@ -285,6 +620,16 @@ export async function registerWorkspaceRoutes(
     const project = await loadProjectContext(app, params.data.projectId);
     if (!project) {
       return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    }
+
+    const actorUserId = await requireProjectMember(
+      app,
+      request,
+      reply,
+      project,
+    );
+    if (!actorUserId) {
+      return;
     }
 
     if (!project.has_nodes) {
@@ -330,7 +675,7 @@ export async function registerWorkspaceRoutes(
       [
         sessionId,
         params.data.projectId,
-        project.created_by,
+        actorUserId,
         body.data.title,
         body.data.visibility,
         project.online_node_id,
@@ -359,10 +704,42 @@ export async function registerWorkspaceRoutes(
       return sendValidationError(reply, query.error);
     }
 
-    const values: unknown[] = [params.data.projectId];
+    const project = await loadProjectContext(app, params.data.projectId);
+    if (!project) {
+      return reply.code(404).send({ code: "PROJECT_NOT_FOUND" });
+    }
+
+    const actorUserId = await requireProjectMember(
+      app,
+      request,
+      reply,
+      project,
+    );
+    if (!actorUserId) {
+      return;
+    }
+
+    const cursor = query.data.cursor
+      ? decodeCursor(query.data.cursor, sessionCursorSchema)
+      : null;
+
+    if (
+      query.data.cursor &&
+      (!cursor ||
+        !hasMatchingSessionCursorScope(cursor, {
+          projectId: params.data.projectId,
+          actorUserId,
+          visibility: query.data.visibility,
+        }))
+    ) {
+      return sendInvalidCursor(reply);
+    }
+
+    const values: unknown[] = [params.data.projectId, actorUserId];
     const filters = [
       "s.project_id = $1",
       "s.archived_at IS NULL",
+      "(s.visibility = 'shared' OR s.creator_id = $2)",
     ];
 
     if (query.data.visibility) {
@@ -370,7 +747,21 @@ export async function registerWorkspaceRoutes(
       filters.push(`s.visibility = $${values.length}`);
     }
 
-    values.push(query.data.limit);
+    if (cursor) {
+      values.push(cursor.sort_at);
+      const cursorSortIndex = values.length;
+      values.push(cursor.session_id);
+      const cursorSessionIndex = values.length;
+      filters.push(
+        `(COALESCE(s.last_message_at, s.created_at) < $${cursorSortIndex}::timestamptz
+          OR (
+            COALESCE(s.last_message_at, s.created_at) = $${cursorSortIndex}::timestamptz
+            AND s.id < $${cursorSessionIndex}::uuid
+          ))`,
+      );
+    }
+
+    values.push(query.data.limit + 1);
 
     const result = await app.db.query(
       `SELECT
@@ -384,6 +775,7 @@ export async function registerWorkspaceRoutes(
          s.bound_agent_node_id,
          s.bound_agent_session_ref,
          s.last_message_at,
+         COALESCE(s.last_message_at, s.created_at) AS sort_at,
          s.created_at,
          s.updated_at,
          COUNT(*) FILTER (
@@ -398,10 +790,24 @@ export async function registerWorkspaceRoutes(
       values,
     );
 
-    return {
-      data: result.rows.map((row) => serializeSession(row)),
-      next_cursor: null,
-    };
+    const hasMore = result.rows.length > query.data.limit;
+    const pageRows = hasMore
+      ? result.rows.slice(0, query.data.limit)
+      : result.rows;
+    const nextCursor = hasMore
+      ? encodeCursor({
+          sort_at: asIso(pageRows.at(-1)?.sort_at) ?? "",
+          session_id: String(pageRows.at(-1)?.id ?? ""),
+          project_id: params.data.projectId,
+          actor_user_id: actorUserId,
+          visibility: toCursorScopeValue(query.data.visibility),
+        })
+      : null;
+
+    return buildCursorResponse(
+      pageRows.map((row) => serializeSession(row)),
+      nextCursor,
+    );
   });
 
   app.get("/sessions/:sessionId", async (request, reply) => {
@@ -415,10 +821,17 @@ export async function registerWorkspaceRoutes(
       return sendValidationError(reply, params.error);
     }
 
-    const session = await loadSessionDetail(app, params.data.sessionId);
-    if (!session) {
-      return reply.code(404).send({ code: "SESSION_NOT_FOUND" });
+    const access = await requireVisibleSession(
+      app,
+      request,
+      reply,
+      params.data.sessionId,
+    );
+    if (!access) {
+      return;
     }
+
+    const session = await loadSessionDetail(app, params.data.sessionId);
 
     return {
       data: serializeSession(session),
@@ -441,10 +854,21 @@ export async function registerWorkspaceRoutes(
       return sendValidationError(reply, body.error);
     }
 
-    const current = await loadSessionContext(app, params.data.sessionId);
-    if (!current) {
-      return reply.code(404).send({ code: "SESSION_NOT_FOUND" });
+    const access = await requireVisibleSession(
+      app,
+      request,
+      reply,
+      params.data.sessionId,
+      {
+        requireCreator: true,
+      },
+    );
+    if (!access) {
+      return;
     }
+
+    const current = access.session;
+    const actorUserId = access.actorUserId;
 
     if (current.visibility === body.data.visibility) {
       const session = await loadSessionDetail(app, params.data.sessionId);
@@ -458,6 +882,15 @@ export async function registerWorkspaceRoutes(
 
     try {
       await client.query("BEGIN");
+      const transitionAt = new Date();
+      const sharedStartedAt =
+        body.data.visibility === "shared"
+          ? transitionAt
+          : await loadSharedStartedAt(
+              app,
+              params.data.sessionId,
+              current.created_at,
+            );
 
       await client.query(
         `UPDATE sessions
@@ -484,9 +917,9 @@ export async function registerWorkspaceRoutes(
           current.visibility,
           body.data.visibility,
           JSON.stringify(snapshot),
-          body.data.visibility === "shared" ? new Date() : null,
-          current.visibility === "shared" ? new Date() : null,
-          current.creator_id,
+          sharedStartedAt,
+          body.data.visibility === "private" ? transitionAt : null,
+          actorUserId,
         ],
       );
 
@@ -498,7 +931,7 @@ export async function registerWorkspaceRoutes(
            payload,
            occurred_at
          )
-         VALUES ($1, $2, $3, $4::jsonb, now())`,
+         VALUES ($1, $2, $3, $4::jsonb, $5)`,
         [
           params.data.sessionId,
           body.data.visibility === "shared"
@@ -510,8 +943,9 @@ export async function registerWorkspaceRoutes(
           JSON.stringify({
             from: current.visibility,
             to: body.data.visibility,
-            operator_id: current.creator_id,
+            operator_id: actorUserId,
           }),
+          transitionAt,
         ],
       );
 
@@ -538,6 +972,16 @@ export async function registerWorkspaceRoutes(
 
     if (!params.success) {
       return sendValidationError(reply, params.error);
+    }
+
+    const access = await requireVisibleSession(
+      app,
+      request,
+      reply,
+      params.data.sessionId,
+    );
+    if (!access) {
+      return;
     }
 
     const result = await app.db.query(
@@ -572,6 +1016,16 @@ export async function registerWorkspaceRoutes(
 
     if (!params.success) {
       return sendValidationError(reply, params.error);
+    }
+
+    const access = await requireVisibleSession(
+      app,
+      request,
+      reply,
+      params.data.sessionId,
+    );
+    if (!access) {
+      return;
     }
 
     const result = await app.db.query(
@@ -618,6 +1072,18 @@ export async function registerWorkspaceRoutes(
       return sendValidationError(reply, body.error);
     }
 
+    const access = await requireVisibleSession(
+      app,
+      request,
+      reply,
+      params.data.sessionId,
+    );
+    if (!access) {
+      return;
+    }
+
+    const actorUserId = access.actorUserId;
+
     const client = await app.db.connect();
 
     try {
@@ -625,13 +1091,15 @@ export async function registerWorkspaceRoutes(
 
       const sessionResult = await client.query(
         `SELECT
-           id,
-           creator_id,
-           runtime_status
-         FROM sessions
-         WHERE id = $1
-           AND archived_at IS NULL
-         FOR UPDATE`,
+           s.id,
+           s.creator_id,
+           s.runtime_status
+         FROM sessions s
+         JOIN projects p ON p.id = s.project_id
+         WHERE s.id = $1
+           AND s.archived_at IS NULL
+           AND p.archived_at IS NULL
+         FOR UPDATE OF s, p`,
         [params.data.sessionId],
       );
 
@@ -672,6 +1140,7 @@ export async function registerWorkspaceRoutes(
                 queue_position: 0,
               },
               duplicated: true,
+              idempotent_replay: true,
             },
           };
         }
@@ -721,7 +1190,7 @@ export async function registerWorkspaceRoutes(
            created_at`,
         [
           params.data.sessionId,
-          session.creator_id,
+          actorUserId,
           body.data.content,
           processingStatus,
           nextSequence,
@@ -798,14 +1267,29 @@ export async function registerWorkspaceRoutes(
         );
 
         if (existing.rows[0]) {
+          const sessionState = await app.db.query(
+            `SELECT s.runtime_status
+             FROM sessions s
+             JOIN projects p ON p.id = s.project_id
+             WHERE s.id = $1
+               AND s.archived_at IS NULL
+               AND p.archived_at IS NULL`,
+            [params.data.sessionId],
+          );
+
+          if (!sessionState.rows[0]) {
+            return reply.code(404).send({ code: "SESSION_NOT_FOUND" });
+          }
+
           return {
             data: {
               message: serializeMessage(existing.rows[0]),
               dispatch_state: {
-                session_runtime_status: "queued",
+                session_runtime_status: sessionState.rows[0].runtime_status,
                 queue_position: 0,
               },
               duplicated: true,
+              idempotent_replay: true,
             },
           };
         }
@@ -826,6 +1310,16 @@ export async function registerWorkspaceRoutes(
 
     if (!params.success) {
       return sendValidationError(reply, params.error);
+    }
+
+    const access = await requireVisibleSession(
+      app,
+      request,
+      reply,
+      params.data.sessionId,
+    );
+    if (!access) {
+      return;
     }
 
     const [messagesResult, eventsResult] = await Promise.all([
@@ -850,7 +1344,13 @@ export async function registerWorkspaceRoutes(
            payload,
            occurred_at
          FROM session_events
-         WHERE session_id = $1`,
+         WHERE session_id = $1
+           AND event_type IN (
+             'status.changed',
+             'command.summary',
+             'session.shared',
+             'session.privatized'
+           )`,
         [params.data.sessionId],
       ),
     ]);
@@ -863,7 +1363,9 @@ export async function registerWorkspaceRoutes(
         sender_type: row.sender_type,
         content: row.content,
       })),
-      ...eventsResult.rows.map((row) => mapReplayEvent(row)),
+      ...eventsResult.rows
+        .map((row) => mapReplayEvent(row))
+        .filter((entry) => entry !== null),
     ].sort((left, right) =>
       String(left.occurred_at).localeCompare(String(right.occurred_at)),
     );
@@ -889,6 +1391,64 @@ export async function registerWorkspaceRoutes(
       return sendValidationError(reply, query.error);
     }
 
+    const team = await loadTeamContext(app, params.data.teamId);
+    if (!team) {
+      return reply.code(404).send({ code: "TEAM_NOT_FOUND" });
+    }
+
+    const actorUserId = await requireTeamMember(app, request, reply, team);
+    if (!actorUserId) {
+      return;
+    }
+
+    const cursor = query.data.cursor
+      ? decodeCursor(query.data.cursor, searchCursorSchema)
+      : null;
+
+    if (
+      query.data.cursor &&
+      (!cursor ||
+        !hasMatchingSearchCursorScope(cursor, {
+          teamId: params.data.teamId,
+          actorUserId,
+          projectId: query.data.project_id,
+          q: query.data.q,
+        }))
+    ) {
+      return sendInvalidCursor(reply);
+    }
+
+    const values: unknown[] = [
+      params.data.teamId,
+      actorUserId,
+      query.data.project_id ?? null,
+      query.data.q,
+    ];
+    const filters = [
+      "p.team_id = $1",
+      "p.archived_at IS NULL",
+      "s.archived_at IS NULL",
+      "($3::uuid IS NULL OR s.project_id = $3)",
+      "(s.visibility = 'shared' OR s.creator_id = $2)",
+      "m.search_vector @@ plainto_tsquery('simple', $4)",
+    ];
+
+    if (cursor) {
+      values.push(cursor.occurred_at);
+      const cursorOccurredIndex = values.length;
+      values.push(cursor.message_id);
+      const cursorMessageIndex = values.length;
+      filters.push(
+        `(m.created_at < $${cursorOccurredIndex}::timestamptz
+          OR (
+            m.created_at = $${cursorOccurredIndex}::timestamptz
+            AND m.id < $${cursorMessageIndex}::uuid
+          ))`,
+      );
+    }
+
+    values.push(query.data.limit + 1);
+
     const result = await app.db.query(
       `SELECT
          m.id AS message_id,
@@ -900,21 +1460,29 @@ export async function registerWorkspaceRoutes(
        FROM messages m
        JOIN sessions s ON s.id = m.session_id
        JOIN projects p ON p.id = s.project_id
-       WHERE p.team_id = $1
-         AND ($2::uuid IS NULL OR s.project_id = $2)
-         AND m.search_vector @@ plainto_tsquery('simple', $3)
-       ORDER BY m.created_at DESC
-       LIMIT $4`,
-      [
-        params.data.teamId,
-        query.data.project_id ?? null,
-        query.data.q,
-        query.data.limit,
-      ],
+       WHERE ${filters.join(" AND ")}
+       ORDER BY m.created_at DESC, m.id DESC
+       LIMIT $${values.length}`,
+      values,
     );
 
-    return {
-      data: result.rows.map((row) => ({
+    const hasMore = result.rows.length > query.data.limit;
+    const pageRows = hasMore
+      ? result.rows.slice(0, query.data.limit)
+      : result.rows;
+    const nextCursor = hasMore
+      ? encodeCursor({
+          occurred_at: asIso(pageRows.at(-1)?.created_at) ?? "",
+          message_id: String(pageRows.at(-1)?.message_id ?? ""),
+          team_id: params.data.teamId,
+          actor_user_id: actorUserId,
+          project_id: toCursorScopeValue(query.data.project_id),
+          q: query.data.q,
+        })
+      : null;
+
+    return buildCursorResponse(
+      pageRows.map((row) => ({
         session_id: row.session_id,
         project_id: row.project_id,
         message_id: row.message_id,
@@ -922,8 +1490,8 @@ export async function registerWorkspaceRoutes(
         snippet: String(row.content).slice(0, 200),
         occurred_at: asIso(row.created_at),
       })),
-      next_cursor: null,
-    };
+      nextCursor,
+    );
   });
 
   app.get("/sessions/:sessionId/todos", async (request, reply) => {
@@ -935,6 +1503,16 @@ export async function registerWorkspaceRoutes(
 
     if (!params.success) {
       return sendValidationError(reply, params.error);
+    }
+
+    const access = await requireVisibleSession(
+      app,
+      request,
+      reply,
+      params.data.sessionId,
+    );
+    if (!access) {
+      return;
     }
 
     const result = await app.db.query(
@@ -974,9 +1552,30 @@ export async function registerWorkspaceRoutes(
       return sendValidationError(reply, body.error);
     }
 
-    const session = await loadSessionContext(app, params.data.sessionId);
-    if (!session) {
-      return reply.code(404).send({ code: "SESSION_NOT_FOUND" });
+    const access = await requireVisibleSession(
+      app,
+      request,
+      reply,
+      params.data.sessionId,
+    );
+    if (!access) {
+      return;
+    }
+
+    const sourceMessage = await app.db.query(
+      `SELECT id
+       FROM messages
+       WHERE id = $1
+         AND session_id = $2
+         AND (
+           sender_type = 'member'
+           OR (sender_type = 'agent' AND is_final_reply = TRUE)
+         )`,
+      [body.data.source_message_id, params.data.sessionId],
+    );
+
+    if (!sourceMessage.rows[0]) {
+      return reply.code(404).send({ code: "MESSAGE_NOT_FOUND" });
     }
 
     try {
@@ -1002,7 +1601,7 @@ export async function registerWorkspaceRoutes(
           params.data.sessionId,
           body.data.source_message_id,
           body.data.title,
-          session.creator_id,
+          access.actorUserId,
         ],
       );
 
@@ -1037,6 +1636,21 @@ export async function registerWorkspaceRoutes(
     const body = todoPatchSchema.safeParse(request.body);
     if (!body.success) {
       return sendValidationError(reply, body.error);
+    }
+
+    const todo = await loadTodoContext(app, params.data.todoId);
+    if (!todo) {
+      return reply.code(404).send({ code: "TODO_NOT_FOUND" });
+    }
+
+    const actorUserId = requireActorUserId(request, reply);
+    if (!actorUserId) {
+      return;
+    }
+
+    const member = await isTeamMember(app, String(todo.team_id), actorUserId);
+    if (!member || !hasSessionVisibility(todo, actorUserId)) {
+      return reply.code(403).send({ code: "SESSION_NOT_VISIBLE" });
     }
 
     const result = await app.db.query(

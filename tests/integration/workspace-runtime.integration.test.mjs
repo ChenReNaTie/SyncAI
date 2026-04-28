@@ -44,9 +44,14 @@ test(
 
     try {
       await withInjectedApp(async (app) => {
+        const actorHeaders = {
+          "x-syncai-user-id": context.memberId,
+        };
+
         const response = await app.inject({
           method: "POST",
           url: `/api/v1/sessions/${context.sessionId}/messages`,
+          headers: actorHeaders,
           payload: {
             content: "Complete the queue processing path",
             client_message_id: "workspace-runtime-001",
@@ -120,9 +125,14 @@ test(
     try {
       await withInjectedApp(
         async (app) => {
+          const actorHeaders = {
+            "x-syncai-user-id": context.memberId,
+          };
+
           const firstResponse = await app.inject({
             method: "POST",
             url: `/api/v1/sessions/${context.sessionId}/messages`,
+            headers: actorHeaders,
             payload: {
               content: "First queued job",
               client_message_id: "workspace-runtime-queue-001",
@@ -131,6 +141,7 @@ test(
           const secondResponse = await app.inject({
             method: "POST",
             url: `/api/v1/sessions/${context.sessionId}/messages`,
+            headers: actorHeaders,
             payload: {
               content: "Second queued job",
               client_message_id: "workspace-runtime-queue-002",
@@ -195,9 +206,14 @@ test(
 
     try {
       await withInjectedApp(async (app) => {
+        const actorHeaders = {
+          "x-syncai-user-id": context.memberId,
+        };
+
         const response = await app.inject({
           method: "POST",
           url: `/api/v1/sessions/${context.sessionId}/messages`,
+          headers: actorHeaders,
           payload: {
             content: "[mock-fail] Simulate a Codex failure",
             client_message_id: "workspace-runtime-failure-001",
