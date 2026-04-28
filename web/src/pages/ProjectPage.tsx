@@ -207,7 +207,7 @@ export function ProjectPage() {
           <ul className="team-grid">
             {sessions.map((session) => (
               <li key={session.id} className="card">
-                <h4>{session.title}</h4>
+                <h4><Link to={`/sessions/${session.id}`}>{session.title}</Link></h4>
                 <p>
                   <strong>Visibility:</strong> {session.visibility}
                 </p>

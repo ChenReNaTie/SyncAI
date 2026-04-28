@@ -236,3 +236,66 @@ export function createSession(
     body: JSON.stringify({ title, visibility }),
   });
 }
+
+export interface SessionDetail {
+  id: string;
+  title: string;
+  visibility: "shared" | "private";
+  runtime_status: string;
+  project_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SessionDetailResponse {
+  data: SessionDetail;
+}
+
+export interface Message {
+  id: string;
+  content: string;
+  sender: string;
+  session_id: string;
+  created_at: string;
+}
+
+export interface MessagesResponse {
+  data: Message[];
+}
+
+export interface SendMessageResponse {
+  data: Message;
+}
+
+export function getSessionDetail(
+  token: string,
+  sessionId: string,
+): Promise<SessionDetailResponse> {
+  return request<SessionDetailResponse>(`/sessions/${sessionId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export function getMessages(
+  token: string,
+  sessionId: string,
+): Promise<MessagesResponse> {
+  return request<MessagesResponse>(`/sessions/${sessionId}/messages`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export function sendMessage(
+  token: string,
+  sessionId: string,
+  content: string,
+): Promise<SendMessageResponse> {
+  return request<SendMessageResponse>(`/sessions/${sessionId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ content }),
+  });
+}
