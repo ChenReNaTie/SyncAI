@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
+import { searchMessages, type SearchMessageItem } from "../api/client";
 
 interface Team {
   id: string;
@@ -16,6 +17,14 @@ export function DashboardPage() {
   const [newTeamSlug, setNewTeamSlug] = useState("");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedTeamId, setSelectedTeamId] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchMessageItem[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchTotal, setSearchTotal] = useState(0);
 
   const navigate = useNavigate();
   
@@ -121,6 +130,44 @@ export function DashboardPage() {
     navigate("/login");
   };
 
+  const handleSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!searchQuery.trim() || !selectedTeamId) {
+      setSearchError("Please enter a search query and select a team");
+      return;
+    }
+
+    try {
+      setSearching(true);
+      setSearchError(null);
+      setSearchResults([]);
+      setSearchTotal(0);
+
+      const token = localStorage.getItem("token");
+      if (!token) {
+        throw new Error("No authentication token found");
+      }
+
+      const response = await searchMessages(
+        token,
+        selectedTeamId,
+        searchQuery.trim(),
+      );
+
+      setSearchResults(response.data || []);
+      setSearchTotal(response.meta?.total ?? 0);
+    } catch (err: any) {
+      if (err.message?.includes("401") || err.message === "UNAUTHORIZED") {
+        localStorage.removeItem("token");
+        navigate("/login");
+        return;
+      }
+      setSearchError(err.message || "Search failed");
+    } finally {
+      setSearching(false);
+    }
+  };
+
   if (loading) {
     return (
       <main className="page-shell">
@@ -141,6 +188,89 @@ export function DashboardPage() {
         </button>
       </header>
       
+      <section className="content-section">
+        <div className="section-header">
+          <h2>Search Messages</h2>
+        </div>
+
+        <form onSubmit={handleSearch} className="form">
+          {searchError && (
+            <div className="alert alert-error">
+              <p>{searchError}</p>
+            </div>
+          )}
+
+          <div className="form-group">
+            <label htmlFor="searchQuery">Search</label>
+            <input
+              id="searchQuery"
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Enter keyword to search messages..."
+              className="form-control"
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="searchTeam">Team</label>
+            <select
+              id="searchTeam"
+              value={selectedTeamId}
+              onChange={(e) => setSelectedTeamId(e.target.value)}
+              className="form-control"
+            >
+              <option value="">-- Select a team --</option>
+              {teams.map((team) => (
+                <option key={team.id} value={team.id}>
+                  {team.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={searching}
+          >
+            {searching ? "Searching..." : "Search"}
+          </button>
+        </form>
+
+        {searchResults.length > 0 && (
+          <div className="search-results" style={{ marginTop: "1rem" }}>
+            <p>
+              <strong>{searchTotal}</strong> result{searchTotal !== 1 ? "s" : ""} found
+            </p>
+            <ul className="search-result-list" style={{ listStyle: "none", padding: 0 }}>
+              {searchResults.map((item) => (
+                <li
+                  key={item.message_id}
+                  className="card"
+                  style={{ marginBottom: "0.5rem" }}
+                >
+                  <p>
+                    <strong>Project:</strong> {item.project_name}
+                  </p>
+                  <p>
+                    <strong>Session:</strong> {item.session_title}
+                  </p>
+                  <p style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                    {item.content.length > 200
+                      ? item.content.slice(0, 200) + "..."
+                      : item.content}
+                  </p>
+                  <small>
+                    {new Date(item.created_at).toLocaleString()}
+                  </small>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </section>
+
       <section className="content-section">
         <div className="section-header">
           <h2>Your Teams</h2>

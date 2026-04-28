@@ -299,3 +299,38 @@ export function sendMessage(
     body: JSON.stringify({ content }),
   });
 }
+
+export interface SearchMessageItem {
+  message_id: string;
+  content: string;
+  sender: string;
+  session_id: string;
+  session_title: string;
+  project_id: string;
+  project_name: string;
+  created_at: string;
+}
+
+export interface SearchMeta {
+  query: string;
+  team_id: string;
+  total: number;
+  next_cursor: string | null;
+}
+
+export interface SearchMessagesResponse {
+  data: SearchMessageItem[];
+  meta: SearchMeta;
+}
+
+export function searchMessages(
+  token: string,
+  teamId: string,
+  query: string,
+): Promise<SearchMessagesResponse> {
+  const qs = new URLSearchParams({ q: query });
+  return request<SearchMessagesResponse>(
+    `/teams/${teamId}/search?${qs.toString()}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+}
