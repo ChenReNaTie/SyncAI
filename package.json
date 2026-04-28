@@ -1,8 +1,8 @@
-﻿{
+{
     "name":  "syncai",
     "version":  "0.1.0",
     "private":  true,
-    "description":  "SyncAI / 鐏垫倝 AI monorepo",
+    "description":  "SyncAI / 灵悉 AI monorepo",
     "engines":  {
                     "node":  "\u003e=24.0.0"
                 },
