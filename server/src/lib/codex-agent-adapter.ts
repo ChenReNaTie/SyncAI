@@ -110,6 +110,25 @@ export function resolveCodexExecutablePath(codexPath?: string) {
   return findSystemCodexPath() ?? (process.platform === "win32" ? "codex.cmd" : "codex");
 }
 
+export function resolvePersistedCodexThreadId(
+  sessionId: string,
+  agentSessionRef?: string,
+) {
+  const normalizedRef = agentSessionRef?.trim();
+  if (!normalizedRef) {
+    return undefined;
+  }
+
+  if (
+    normalizedRef === sessionId ||
+    normalizedRef === `syncai-session:${sessionId}`
+  ) {
+    return undefined;
+  }
+
+  return normalizedRef;
+}
+
 export function requireCodexWorkingDirectory(workingDirectory?: string) {
   if (!workingDirectory?.trim()) {
     throw new CodexWorkingDirectoryError(
@@ -168,8 +187,21 @@ export function createCodexAgentAdapter(options: {
       if (!sessionState) {
         // Lazy init: session was created before server restart or binding was lost
         const wd = requireCodexWorkingDirectory(input.workingDirectory);
-        sessionState = { threadId: "", workingDirectory: wd };
+        sessionState = {
+          threadId:
+            resolvePersistedCodexThreadId(
+              input.sessionId,
+              input.agentSessionRef,
+            ) ?? "",
+          workingDirectory: wd,
+        };
         sessions.set(input.sessionId, sessionState);
+      } else if (!sessionState.threadId) {
+        sessionState.threadId =
+          resolvePersistedCodexThreadId(
+            input.sessionId,
+            input.agentSessionRef,
+          ) ?? sessionState.threadId;
       }
 
       const thread = sessionState.threadId

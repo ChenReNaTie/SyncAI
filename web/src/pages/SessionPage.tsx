@@ -47,6 +47,19 @@ interface RenderedEvent {
 
 let _eventSeq = 0;
 
+function resolveDisplayedCodexThreadId(session: SessionDetail | null) {
+  const ref = session?.bound_agent_session_ref?.trim();
+  if (!session || !ref) {
+    return null;
+  }
+
+  if (ref === session.id || ref === `syncai-session:${session.id}`) {
+    return null;
+  }
+
+  return ref;
+}
+
 function renderStreamEvent(ev: CodexStreamEvent): RenderedEvent | null {
   const d = ev.data ?? {};
   const data = d as Record<string, unknown>;
@@ -298,6 +311,20 @@ export function SessionPage() {
           setSession((prev) => (prev ? { ...prev, runtime_status: status } : prev));
         },
         onStreamEvent(ev: CodexStreamEvent) {
+          if (
+            ev.type === "thread.started" &&
+            ev.data &&
+            typeof ev.data === "object" &&
+            "thread_id" in ev.data
+          ) {
+            const threadId = String(ev.data.thread_id);
+            setSession((prev) =>
+              prev
+                ? { ...prev, bound_agent_session_ref: threadId }
+                : prev,
+            );
+          }
+
           setStreamEvents((prev) => {
             // For agent_message items, replace previous partial updates for the same item
             if (
@@ -463,6 +490,7 @@ export function SessionPage() {
 
   const displayMessages = replayMode ? replayMessages : messages;
   const projectLink = session?.project_id ? `/projects/${session.project_id}` : "/dashboard";
+  const codexThreadId = resolveDisplayedCodexThreadId(session);
 
   // Render stream events into UI rows
   const renderedEvents = streamEvents
@@ -487,17 +515,33 @@ export function SessionPage() {
       fullHeight
     >
       {/* Header */}
-      <div className="flex items-center justify-between flex-wrap gap-3 mb-4 shrink-0">
-        <div className="flex items-center gap-3 min-w-0">
-          <h1 className="text-xl font-bold text-text-primary truncate">
-            {session?.title ?? "Session"}
-          </h1>
-          {session?.runtime_status && (
-            <Badge variant="accent">{session.runtime_status}</Badge>
-          )}
-          {replayMode && (
-            <Badge variant="warning">REPLAY</Badge>
-          )}
+      <div className="flex items-start justify-between flex-wrap gap-3 mb-4 shrink-0">
+        <div className="min-w-0">
+          <div className="flex items-center gap-3 min-w-0">
+            <h1 className="text-xl font-bold text-text-primary truncate">
+              {session?.title ?? "Session"}
+            </h1>
+            {session?.runtime_status && (
+              <Badge variant="accent">{session.runtime_status}</Badge>
+            )}
+            {replayMode && (
+              <Badge variant="warning">REPLAY</Badge>
+            )}
+          </div>
+          <div className="mt-2 flex flex-col gap-1 text-xs">
+            <div className="flex flex-wrap items-center gap-2 text-text-muted">
+              <span className="uppercase tracking-[0.18em] text-[10px] text-text-muted/80">
+                Codex Thread
+              </span>
+              {codexThreadId ? (
+                <code className="rounded-md bg-surface-3 px-2 py-1 text-[11px] text-accent-light break-all">
+                  {codexThreadId}
+                </code>
+              ) : (
+                <span>尚未生成，首次真实消息成功后显示</span>
+              )}
+            </div>
+          </div>
         </div>
         <Button
           variant={replayMode ? "secondary" : "ghost"}

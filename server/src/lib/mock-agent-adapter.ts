@@ -40,6 +40,7 @@ export interface SendMessageInput {
   sessionId: string;
   messageId: string;
   content: string;
+  agentSessionRef?: string;
   workingDirectory?: string;
 }
 

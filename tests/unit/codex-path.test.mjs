@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   CodexWorkingDirectoryError,
   requireCodexWorkingDirectory,
+  resolvePersistedCodexThreadId,
   resolveCodexExecutablePath,
 } from "../../server/dist/lib/codex-agent-adapter.js";
 
@@ -46,6 +47,24 @@ test("working directory validator accepts existing directories", () => {
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
+});
+
+test("persisted codex thread resolver ignores local placeholder refs", () => {
+  const sessionId = "2f078e5d-4a6e-45f7-a694-6d510a5604f2";
+
+  assert.equal(resolvePersistedCodexThreadId(sessionId), undefined);
+  assert.equal(resolvePersistedCodexThreadId(sessionId, sessionId), undefined);
+  assert.equal(
+    resolvePersistedCodexThreadId(sessionId, `syncai-session:${sessionId}`),
+    undefined,
+  );
+});
+
+test("persisted codex thread resolver keeps real codex thread refs", () => {
+  const sessionId = "2f078e5d-4a6e-45f7-a694-6d510a5604f2";
+  const threadId = "thread_abc123";
+
+  assert.equal(resolvePersistedCodexThreadId(sessionId, threadId), threadId);
 });
 
 test("windows codex resolution prefers the real codex.exe over codex.cmd shims", () => {

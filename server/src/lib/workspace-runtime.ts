@@ -22,6 +22,7 @@ interface ClaimedMessage {
   sessionId: string;
   messageId: string;
   content: string;
+  agentSessionRef: string | undefined;
   runtimeStatus: SessionRuntimeStatus;
 }
 
@@ -76,7 +77,7 @@ export function createWorkspaceRuntime(options: {
       await client.query("BEGIN");
 
       const sessionResult = await client.query(
-        `SELECT runtime_status
+        `SELECT runtime_status, bound_agent_session_ref
          FROM sessions
          WHERE id = $1
            AND archived_at IS NULL
@@ -138,6 +139,10 @@ export function createWorkspaceRuntime(options: {
         sessionId,
         messageId: String(message.id),
         content: String(message.content),
+        agentSessionRef:
+          typeof session.bound_agent_session_ref === "string"
+            ? String(session.bound_agent_session_ref)
+            : undefined,
         runtimeStatus: session.runtime_status as SessionRuntimeStatus,
       };
     } catch (error) {
@@ -331,6 +336,21 @@ export function createWorkspaceRuntime(options: {
     }
   }
 
+  async function persistAgentSessionRef(
+    sessionId: string,
+    agentSessionRef: string,
+  ) {
+    await options.db.query(
+      `UPDATE sessions
+       SET bound_agent_session_ref = $2,
+           updated_at = now()
+       WHERE id = $1
+         AND archived_at IS NULL
+         AND bound_agent_session_ref <> $2`,
+      [sessionId, agentSessionRef],
+    );
+  }
+
   async function processSession(sessionId: string) {
     while (true) {
       const message = await claimNextMessage(sessionId);
@@ -362,11 +382,27 @@ export function createWorkspaceRuntime(options: {
           messageId: message.messageId,
           content: message.content,
         };
+        if (message.agentSessionRef) {
+          sendInput.agentSessionRef = message.agentSessionRef;
+        }
         if (workingDirectory) {
           sendInput.workingDirectory = workingDirectory;
         }
 
         for await (const event of adapter.sendMessage(sendInput)) {
+          if (
+            event.type === "thread.started" &&
+            event.data &&
+            typeof event.data === "object" &&
+            "thread_id" in event.data
+          ) {
+            const threadId = String(event.data.thread_id);
+            if (threadId && threadId !== message.agentSessionRef) {
+              await persistAgentSessionRef(message.sessionId, threadId);
+              message.agentSessionRef = threadId;
+            }
+          }
+
           emitter.emit("stream.event", {
             sessionId: message.sessionId,
             event,
