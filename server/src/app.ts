@@ -24,6 +24,7 @@ export async function buildApp() {
   const workspaceRuntime = createWorkspaceRuntime({
     db,
     logger: app.log,
+    ...(env.codexPath ? { codexPath: env.codexPath } : {}),
     mockLatencyMs: env.mockAgentLatencyMs,
   });
 
@@ -31,6 +32,7 @@ export async function buildApp() {
     appName: env.appName,
     databaseUrl: env.databaseUrl,
     redisUrl: env.redisUrl,
+    ...(env.codexPath ? { codexPath: env.codexPath } : {}),
     authAccessSecret: env.authAccessSecret,
     authRefreshSecret: env.authRefreshSecret,
     authAccessTtlSeconds: env.authAccessTtlSeconds,
@@ -71,6 +73,7 @@ declare module "fastify" {
       appName: string;
       databaseUrl: string;
       redisUrl: string;
+      codexPath?: string;
       authAccessSecret: string;
       authRefreshSecret: string;
       authAccessTtlSeconds: number;

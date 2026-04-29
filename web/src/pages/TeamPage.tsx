@@ -277,16 +277,21 @@ export function TeamPage() {
           ) : (
             <ul className="space-y-2">
               {members.map((m) => (
+                (() => {
+                  const memberLabel = m.display_name || m.email;
+                  const memberInitial = memberLabel.charAt(0).toUpperCase() || "?";
+
+                  return (
                 <li
                   key={m.user_id}
                   className="flex items-center gap-3 px-3 py-2 rounded-lg bg-surface-2 border border-glass-border"
                 >
                   <span className="flex-shrink-0 w-8 h-8 rounded-full bg-glass-border flex items-center justify-center text-xs text-text-secondary font-medium">
-                    {(m.display_name || m.email)[0].toUpperCase()}
+                    {memberInitial}
                   </span>
                   <div className="flex-1 min-w-0">
                     <span className="text-sm text-text-primary truncate block">
-                      {m.display_name || m.email}
+                      {memberLabel}
                     </span>
                     {m.display_name && (
                       <span className="text-xs text-text-muted truncate block">
@@ -306,6 +311,8 @@ export function TeamPage() {
                     {m.is_creator ? "团长" : m.role === "admin" ? "管理员" : "成员"}
                   </span>
                 </li>
+                  );
+                })()
               ))}
             </ul>
           )}

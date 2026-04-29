@@ -1,3 +1,5 @@
+import { existsSync, statSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import { Codex } from "@openai/codex-sdk";
 import type {
   MockAgentAdapter,
@@ -12,22 +14,148 @@ interface CodexSessionState {
   workingDirectory: string;
 }
 
+export class CodexWorkingDirectoryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CodexWorkingDirectoryError";
+  }
+}
+
+function isNodeModulesBinPath(pathEntry: string) {
+  const normalized = pathEntry.replace(/\\/gu, "/").toLowerCase();
+  return normalized.includes("/node_modules/") && normalized.endsWith("/.bin");
+}
+
+function isWindowsAppsPath(pathEntry: string) {
+  return pathEntry.replace(/\\/gu, "/").toLowerCase().includes("/windowsapps");
+}
+
+function getWindowsCodexBinaryMetadata() {
+  if (process.arch === "arm64") {
+    return {
+      packageName: "codex-win32-arm64",
+      targetTriple: "aarch64-pc-windows-msvc",
+    };
+  }
+
+  return {
+    packageName: "codex-win32-x64",
+    targetTriple: "x86_64-pc-windows-msvc",
+  };
+}
+
+function resolveWindowsCodexExecutable(pathEntry: string) {
+  if (isWindowsAppsPath(pathEntry)) {
+    return undefined;
+  }
+
+  const directExecutable = join(pathEntry, "codex.exe");
+  if (existsSync(directExecutable)) {
+    return directExecutable;
+  }
+
+  const metadata = getWindowsCodexBinaryMetadata();
+  const vendorExecutable = join(
+    pathEntry,
+    "node_modules",
+    "@openai",
+    "codex",
+    "node_modules",
+    "@openai",
+    metadata.packageName,
+    "vendor",
+    metadata.targetTriple,
+    "codex",
+    "codex.exe",
+  );
+
+  return existsSync(vendorExecutable) ? vendorExecutable : undefined;
+}
+
+function findSystemCodexPath() {
+  const pathValue = process.env.PATH ?? "";
+
+  for (const entry of pathValue.split(delimiter)) {
+    const trimmed = entry.trim();
+    if (!trimmed || isNodeModulesBinPath(trimmed)) {
+      continue;
+    }
+
+    if (process.platform === "win32") {
+      const windowsExecutable = resolveWindowsCodexExecutable(trimmed);
+      if (windowsExecutable) {
+        return windowsExecutable;
+      }
+      continue;
+    }
+
+    const fullPath =
+      trimmed.endsWith("\\") || trimmed.endsWith("/")
+        ? `${trimmed}codex`
+        : `${trimmed}/codex`;
+
+    if (existsSync(fullPath)) {
+      return fullPath;
+    }
+  }
+
+  return undefined;
+}
+
+export function resolveCodexExecutablePath(codexPath?: string) {
+  if (codexPath) {
+    return codexPath;
+  }
+
+  return findSystemCodexPath() ?? (process.platform === "win32" ? "codex.cmd" : "codex");
+}
+
+export function requireCodexWorkingDirectory(workingDirectory?: string) {
+  if (!workingDirectory?.trim()) {
+    throw new CodexWorkingDirectoryError(
+      "Project working directory is not configured. Please set a valid working directory before starting a real Codex session.",
+    );
+  }
+
+  const normalizedPath = workingDirectory.trim();
+
+  let stats;
+  try {
+    stats = statSync(normalizedPath);
+  } catch {
+    throw new CodexWorkingDirectoryError(
+      `Project working directory does not exist on this machine: ${normalizedPath}. Please update the project working directory and try again.`,
+    );
+  }
+
+  if (!stats.isDirectory()) {
+    throw new CodexWorkingDirectoryError(
+      `Project working directory is not a directory: ${normalizedPath}. Please update the project working directory and try again.`,
+    );
+  }
+
+  return normalizedPath;
+}
+
 export function createCodexAgentAdapter(options: {
   codexPath?: string;
 } = {}): MockAgentAdapter {
-  const codex = new Codex({
-    codexPathOverride:
-      options.codexPath ??
-      "C:\\Users\\Administrator\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\codex\\codex.exe",
-  });
+  const codexPath = resolveCodexExecutablePath(options.codexPath);
+  const codex = new Codex(
+    codexPath ? { codexPathOverride: codexPath } : undefined,
+  );
 
   const sessions = new Map<string, CodexSessionState>();
 
   return {
     async startSession(input: StartSessionInput) {
+      const workingDirectory = requireCodexWorkingDirectory(
+        input.workingDirectory,
+      );
+
       sessions.set(input.sessionId, {
         threadId: "",
-        workingDirectory: input.workingDirectory ?? process.cwd(),
+        workingDirectory,
       });
 
       return { agentSessionRef: input.sessionId };
@@ -39,7 +167,7 @@ export function createCodexAgentAdapter(options: {
       let sessionState = sessions.get(input.sessionId);
       if (!sessionState) {
         // Lazy init: session was created before server restart or binding was lost
-        const wd = input.workingDirectory ?? process.cwd();
+        const wd = requireCodexWorkingDirectory(input.workingDirectory);
         sessionState = { threadId: "", workingDirectory: wd };
         sessions.set(input.sessionId, sessionState);
       }
