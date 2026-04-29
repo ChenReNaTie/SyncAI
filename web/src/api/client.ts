@@ -311,6 +311,8 @@ export interface SessionDetail {
   visibility: "shared" | "private";
   runtime_status: string;
   project_id: string;
+  bound_agent_session_ref?: string;
+  bound_agent_node_id?: string;
   created_at: string;
   updated_at: string;
 }
