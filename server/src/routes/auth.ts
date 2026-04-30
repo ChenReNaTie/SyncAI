@@ -4,6 +4,7 @@ import {
   hashPassword,
   issueTokenPair,
   verifyAccessToken,
+  verifyRefreshToken,
   verifyPassword,
 } from "../lib/auth.js";
 
@@ -16,6 +17,10 @@ const registerSchema = z.object({
 const loginSchema = z.object({
   email: z.string().trim().email().max(255).transform((value) => value.toLowerCase()),
   password: z.string().min(1).max(200),
+});
+
+const refreshSchema = z.object({
+  refresh_token: z.string().min(1).max(4096),
 });
 
 function sendValidationError(reply: FastifyReply, error: z.ZodError) {
@@ -172,6 +177,36 @@ export async function registerAuthRoutes(
     });
 
     return reply.code(200).send(createAuthEnvelope(updated.rows[0], tokens));
+  });
+
+  app.post("/auth/refresh", async (request, reply) => {
+    const body = refreshSchema.safeParse(request.body);
+    if (!body.success) {
+      return sendValidationError(reply, body.error);
+    }
+
+    const token = verifyRefreshToken(
+      body.data.refresh_token,
+      app.config.authRefreshSecret,
+    );
+    if (!token) {
+      return sendAuthRequired(reply);
+    }
+
+    const user = await loadActiveUser(app, token.userId);
+    if (!user) {
+      return sendAuthRequired(reply);
+    }
+
+    const tokens = issueTokenPair({
+      userId: token.userId,
+      accessSecret: app.config.authAccessSecret,
+      refreshSecret: app.config.authRefreshSecret,
+      accessTtlSeconds: app.config.authAccessTtlSeconds,
+      refreshTtlSeconds: app.config.authRefreshTtlSeconds,
+    });
+
+    return reply.code(200).send(createAuthEnvelope(user, tokens));
   });
 
   app.get("/auth/me", async (request, reply) => {

@@ -1,6 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { getTeams, createTeam, searchMessages, type SearchMessageItem } from "../api/client";
+import {
+  clearAuthSession,
+  createTeam,
+  getStoredAuthToken,
+  getTeams,
+  hasStoredAuthSession,
+  searchMessages,
+  type SearchMessageItem,
+} from "../api/client";
 import { PageShell, GlassCard, Button, Input, Badge, PageLoading } from "../components/index.js";
 
 interface Team {
@@ -33,8 +41,7 @@ export function DashboardPage() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    const token = localStorage.getItem("token");
-    if (!token) {
+    if (!hasStoredAuthSession()) {
       navigate("/login");
       return;
     }
@@ -45,14 +52,14 @@ export function DashboardPage() {
     try {
       setLoading(true);
       setError(null);
-      const token = localStorage.getItem("token");
+      const token = getStoredAuthToken();
       if (!token) throw new Error("未找到登录凭据");
 
       const data = await getTeams(token);
       setTeams(data.data || []);
     } catch (err: any) {
       if (err.message === "UNAUTHORIZED" || err.message?.includes("401")) {
-        localStorage.removeItem("token"); navigate("/login"); return;
+        clearAuthSession(); navigate("/login"); return;
       }
       setError(err.message || "获取团队列表失败");
     } finally {
@@ -104,7 +111,7 @@ export function DashboardPage() {
     try {
       setCreating(true);
       setCreateError(null);
-      const token = localStorage.getItem("token");
+      const token = getStoredAuthToken();
       if (!token) throw new Error("未找到登录凭据");
 
       await createTeam(token, { name: newTeamName.trim(), slug: newTeamSlug.trim() });
@@ -120,14 +127,14 @@ export function DashboardPage() {
   };
 
   const handleLogout = () => {
-    localStorage.removeItem("token");
+    clearAuthSession();
     navigate("/login");
   };
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!searchQuery.trim() || !selectedTeamId) {
-      setSearchError("Enter a keyword and select a team");
+      setSearchError("请输入关键词并选择团队");
       return;
     }
     try {
@@ -135,27 +142,27 @@ export function DashboardPage() {
       setSearchError(null);
       setSearchResults([]);
       setSearchTotal(0);
-      const token = localStorage.getItem("token");
-      if (!token) throw new Error("No authentication token found");
+      const token = getStoredAuthToken();
+      if (!token) throw new Error("未找到登录凭据");
 
       const response = await searchMessages(token, selectedTeamId, searchQuery.trim());
       setSearchResults(response.data || []);
       setSearchTotal(response.meta?.total ?? 0);
     } catch (err: any) {
       if (err.message?.includes("401") || err.message === "UNAUTHORIZED") {
-        localStorage.removeItem("token"); navigate("/login"); return;
+        clearAuthSession(); navigate("/login"); return;
       }
-      setSearchError(err.message || "Search failed");
+      setSearchError(err.message || "搜索失败");
     } finally {
       setSearching(false);
     }
   };
 
-  if (loading) return <PageLoading label="Loading teams..." />;
+  if (loading) return <PageLoading label="加载团队中..." />;
 
   return (
     <PageShell
-      title="Dashboard"
+      title="仪表盘"
       actions={
         <Button variant="ghost" size="sm" onClick={handleLogout}>
           退出登录
@@ -235,7 +242,12 @@ export function DashboardPage() {
         ) : (
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {teams.map((team) => (
-              <Link key={team.id} to={`/teams/${team.id}`} className="block">
+              <Link
+                key={team.id}
+                to={`/teams/${team.id}`}
+                state={{ backTo: { label: "返回仪表盘", href: "/dashboard" } }}
+                className="block"
+              >
                 <div className="p-4 rounded-lg bg-surface-2 border border-glass-border hover:border-accent/30 hover:bg-glass-hover transition-all duration-200 group">
                   <h3 className="font-semibold text-text-primary group-hover:text-accent-light transition-colors">
                     {team.name}

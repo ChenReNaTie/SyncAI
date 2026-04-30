@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { closePool, getPool, insertMessage } from "../helpers/database.mjs";
 import {
+  assertMessageContract,
   assertReplayMessageEntry,
   assertSessionContract,
   assertStrictKeys,
@@ -208,6 +209,38 @@ test("contract_public_session_access lets a joined member read a shared session 
         title: "Shared Session For Member Access",
         visibility: "shared",
         bound_agent_node_id: nodeId,
+      });
+
+      const messages = await app.inject({
+        method: "GET",
+        url: `/api/v1/sessions/${sessionId}/messages`,
+        headers: {
+          authorization: `Bearer ${memberToken}`,
+        },
+      });
+
+      assert.equal(messages.statusCode, 200);
+      const messagesPayload = messages.json();
+      assertStrictKeys(messagesPayload, ["data"]);
+      assert.equal(messagesPayload.data.length, 2);
+      assertMessageContract(messagesPayload.data[0], {
+        id: memberMessage.id,
+        session_id: sessionId,
+        sender_type: "member",
+        sender_user_id: ownerPayload.user.id,
+        sender_display_name: "Public Owner",
+        content: "Shared session history",
+        processing_status: "completed",
+        is_final_reply: false,
+      });
+      assertMessageContract(messagesPayload.data[1], {
+        session_id: sessionId,
+        sender_type: "agent",
+        sender_user_id: null,
+        sender_display_name: "Codex",
+        content: "Shared session final reply",
+        processing_status: "completed",
+        is_final_reply: true,
       });
 
       const replay = await app.inject({

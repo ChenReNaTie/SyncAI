@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { login, register } from "../api/client.js";
+import { login, register, storeAuthSession } from "../api/client.js";
 import { PageShell, GlassCard, Button, Input } from "../components/index.js";
 
 export function LoginPage() {
@@ -24,10 +24,13 @@ export function LoginPage() {
         ? await login(email, password)
         : await register(email, password, displayName);
 
-      localStorage.setItem("token", result.data.access_token);
+      storeAuthSession({
+        accessToken: result.data.access_token,
+        refreshToken: result.data.refresh_token,
+      });
       navigate("/dashboard");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      setError(err instanceof Error ? err.message : "发生未知错误");
       setSubmitting(false);
     }
   }
@@ -49,7 +52,7 @@ export function LoginPage() {
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
+              placeholder="请输入邮箱地址"
               required
             />
 

@@ -1,4 +1,6 @@
 const BASE_URL = "/api/v1";
+const ACCESS_TOKEN_KEY = "token";
+const REFRESH_TOKEN_KEY = "refresh_token";
 
 const ERROR_MESSAGES: Record<string, string> = {
   VALIDATION_ERROR: "请求参数有误，请检查输入",
@@ -24,6 +26,10 @@ export interface TokenResponse {
     access_token: string;
     refresh_token: string;
   };
+}
+
+interface RefreshTokenRequest {
+  refresh_token: string;
 }
 
 export interface MeResponse {
@@ -138,19 +144,137 @@ export interface SessionsParams {
   cursor?: string;
 }
 
+let refreshPromise: Promise<string | null> | null = null;
+
+export function getStoredAccessToken() {
+  return localStorage.getItem(ACCESS_TOKEN_KEY);
+}
+
+export function getStoredRefreshToken() {
+  return localStorage.getItem(REFRESH_TOKEN_KEY);
+}
+
+export function getStoredAuthToken() {
+  return getStoredAccessToken() ?? getStoredRefreshToken();
+}
+
+export function hasStoredAuthSession() {
+  return Boolean(getStoredAccessToken() || getStoredRefreshToken());
+}
+
+export function storeAuthSession(tokens: {
+  accessToken: string;
+  refreshToken: string;
+}) {
+  localStorage.setItem(ACCESS_TOKEN_KEY, tokens.accessToken);
+  localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refreshToken);
+}
+
+export function clearAuthSession() {
+  localStorage.removeItem(ACCESS_TOKEN_KEY);
+  localStorage.removeItem(REFRESH_TOKEN_KEY);
+}
+
+function buildHeaders(headers?: HeadersInit) {
+  const merged = new Headers({
+    "Content-Type": "application/json",
+  });
+
+  if (headers) {
+    const incoming = new Headers(headers);
+    incoming.forEach((value, key) => {
+      merged.set(key, value);
+    });
+  }
+
+  return merged;
+}
+
+function getBearerToken(headers: Headers) {
+  const authorization = headers.get("Authorization");
+  if (!authorization) {
+    return null;
+  }
+
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim() ?? null;
+}
+
+function cloneRequestOptions(options: RequestInit, headers: Headers): RequestInit {
+  return {
+    ...options,
+    headers,
+  };
+}
+
+export async function refreshAccessToken() {
+  const refreshToken = getStoredRefreshToken();
+  if (!refreshToken) {
+    clearAuthSession();
+    return null;
+  }
+
+  if (refreshPromise) {
+    return refreshPromise;
+  }
+
+  refreshPromise = (async () => {
+    const res = await fetch(`${BASE_URL}/auth/refresh`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        refresh_token: refreshToken,
+      } satisfies RefreshTokenRequest),
+    });
+
+    if (!res.ok) {
+      clearAuthSession();
+      return null;
+    }
+
+    const payload = await res.json() as TokenResponse;
+    storeAuthSession({
+      accessToken: payload.data.access_token,
+      refreshToken: payload.data.refresh_token,
+    });
+
+    return payload.data.access_token;
+  })();
+
+  try {
+    return await refreshPromise;
+  } finally {
+    refreshPromise = null;
+  }
+}
+
 async function request<T>(
   path: string,
   options: RequestInit = {},
+  allowRefresh = true,
 ): Promise<T> {
+  const headers = buildHeaders(options.headers);
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
-      ...options.headers,
-    },
-    ...options,
+    ...cloneRequestOptions(options, headers),
   });
 
   if (!res.ok) {
+    const bearerToken = getBearerToken(headers);
+    if (
+      res.status === 401
+      && allowRefresh
+      && bearerToken
+      && !["/auth/login", "/auth/register", "/auth/refresh"].includes(path)
+    ) {
+      const nextAccessToken = await refreshAccessToken();
+      if (nextAccessToken) {
+        headers.set("Authorization", `Bearer ${nextAccessToken}`);
+        return request<T>(path, cloneRequestOptions(options, headers), false);
+      }
+    }
+
     const body = await res.json().catch(() => ({}));
     const code = (body as { code?: string }).code ?? `HTTP ${res.status}`;
     let message = ERROR_MESSAGES[code] || code;
@@ -325,7 +449,13 @@ export interface Message {
   id: string;
   content: string;
   sender: string;
+  sender_type?: "member" | "agent";
+  sender_user_id?: string | null;
+  sender_display_name?: string;
   session_id: string;
+  processing_status?: string;
+  is_final_reply?: boolean;
+  metadata?: Record<string, unknown>;
   created_at: string;
 }
 
@@ -465,8 +595,44 @@ export function searchMessages(
 
 // --- Replay ---
 
+export interface ReplayMessageEntry {
+  entry_type: "message";
+  message_id: string;
+  occurred_at: string;
+  sender_type: "member" | "agent";
+  content: string;
+}
+
+export interface ReplayStatusChangedEntry {
+  entry_type: "status_changed";
+  occurred_at: string;
+  from: string | null;
+  to: string | null;
+  summary: string;
+}
+
+export interface ReplayCommandSummaryEntry {
+  entry_type: "command_summary";
+  occurred_at: string;
+  summary: string;
+}
+
+export interface ReplayVisibilityChangedEntry {
+  entry_type: "visibility_changed";
+  occurred_at: string;
+  from: string | null;
+  to: string | null;
+  summary: string;
+}
+
+export type ReplayEntry =
+  | ReplayMessageEntry
+  | ReplayStatusChangedEntry
+  | ReplayCommandSummaryEntry
+  | ReplayVisibilityChangedEntry;
+
 export interface ReplayResponse {
-  data: Message[];
+  data: ReplayEntry[];
 }
 
 export function getReplay(
@@ -480,7 +646,7 @@ export function getReplay(
 
 // --- Todos ---
 
-export type TodoStatus = "pending" | "done";
+export type TodoStatus = "pending" | "completed";
 
 export interface Todo {
   id: string;

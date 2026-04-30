@@ -4,10 +4,10 @@ import { DashboardPage } from "./pages/DashboardPage.js";
 import { TeamPage } from "./pages/TeamPage.js";
 import { ProjectPage } from "./pages/ProjectPage.js";
 import { SessionPage } from "./pages/SessionPage.js";
+import { hasStoredAuthSession } from "./api/client.js";
 
 function RootRedirect() {
-  const token = localStorage.getItem("token");
-  return token
+  return hasStoredAuthSession()
     ? <Navigate to="/dashboard" replace />
     : <Navigate to="/login" replace />;
 }

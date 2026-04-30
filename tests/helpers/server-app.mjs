@@ -22,7 +22,7 @@ export async function withInjectedApp(callback, envOverrides = {}) {
   const previousEnv = snapshotEnv();
 
   try {
-    Object.assign(process.env, envOverrides);
+    Object.assign(process.env, { NODE_ENV: "test" }, envOverrides);
     const { buildApp } = await import(`${appModuleUrl}?ts=${Date.now()}`);
     const { app } = await buildApp();
 

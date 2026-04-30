@@ -47,67 +47,85 @@ test(
         const actorHeaders = {
           "x-syncai-user-id": context.memberId,
         };
+        const emittedMessages = [];
+        const handleMessageNew = (event) => {
+          emittedMessages.push(event.message);
+        };
 
-        const response = await app.inject({
-          method: "POST",
-          url: `/api/v1/sessions/${context.sessionId}/messages`,
-          headers: actorHeaders,
-          payload: {
-            content: "Complete the queue processing path",
-            client_message_id: "workspace-runtime-001",
-          },
-        });
+        app.workspaceRuntime.on("message.new", handleMessageNew);
 
-        assert.equal(response.statusCode, 201);
+        try {
+          const response = await app.inject({
+            method: "POST",
+            url: `/api/v1/sessions/${context.sessionId}/messages`,
+            headers: actorHeaders,
+            payload: {
+              content: "Complete the queue processing path",
+              client_message_id: "workspace-runtime-001",
+            },
+          });
 
-        const payload = response.json();
-        assert.equal(payload.data.message.processing_status, "accepted");
-        assert.equal(
-          payload.data.dispatch_state.session_runtime_status,
-          "queued",
-        );
+          assert.equal(response.statusCode, 201);
 
-        await app.workspaceRuntime.waitForSession(context.sessionId);
+          const payload = response.json();
+          assert.equal(payload.data.message.processing_status, "accepted");
+          assert.equal(payload.data.message.sender_display_name, "Member");
+          assert.equal(
+            payload.data.dispatch_state.session_runtime_status,
+            "queued",
+          );
 
-        const messagesResult = await getPool().query(
-          `SELECT sender_type, processing_status, is_final_reply, content
-           FROM messages
-           WHERE session_id = $1
-           ORDER BY sequence_no ASC`,
-          [context.sessionId],
-        );
+          await app.workspaceRuntime.waitForSession(context.sessionId);
 
-        assert.equal(messagesResult.rows.length, 2);
-        assert.deepEqual(messagesResult.rows.map((row) => row.sender_type), [
-          "member",
-          "agent",
-        ]);
-        assert.equal(messagesResult.rows[0].processing_status, "completed");
-        assert.equal(messagesResult.rows[1].is_final_reply, true);
-        assert.match(messagesResult.rows[1].content, /Mock Codex completed/u);
+          const messagesResult = await getPool().query(
+            `SELECT sender_type, processing_status, is_final_reply, content
+             FROM messages
+             WHERE session_id = $1
+             ORDER BY sequence_no ASC`,
+            [context.sessionId],
+          );
 
-        const eventsResult = await getPool().query(
-          `SELECT event_type
-           FROM session_events
-           WHERE session_id = $1
-           ORDER BY occurred_at ASC, created_at ASC`,
-          [context.sessionId],
-        );
+          assert.equal(messagesResult.rows.length, 2);
+          assert.deepEqual(messagesResult.rows.map((row) => row.sender_type), [
+            "member",
+            "agent",
+          ]);
+          assert.equal(messagesResult.rows[0].processing_status, "completed");
+          assert.equal(messagesResult.rows[1].is_final_reply, true);
+          assert.match(messagesResult.rows[1].content, /Mock Codex completed/u);
 
-        assert.ok(
-          eventsResult.rows.some((row) => row.event_type === "command.summary"),
-        );
-        assert.ok(
-          eventsResult.rows.some((row) => row.event_type === "status.changed"),
-        );
+          assert.equal(emittedMessages.length, 2);
+          assert.equal(emittedMessages[0].sender_display_name, "Member");
+          assert.equal(emittedMessages[0].sender_type, "member");
+          assert.equal(emittedMessages[1].sender_display_name, "Codex");
+          assert.equal(emittedMessages[1].sender_type, "agent");
+          assert.equal(emittedMessages[1].sender_user_id, null);
 
-        const sessionResult = await getPool().query(
-          `SELECT runtime_status
-           FROM sessions
-           WHERE id = $1`,
-          [context.sessionId],
-        );
-        assert.equal(sessionResult.rows[0].runtime_status, "completed");
+          const eventsResult = await getPool().query(
+            `SELECT event_type
+             FROM session_events
+             WHERE session_id = $1
+             ORDER BY occurred_at ASC, created_at ASC`,
+            [context.sessionId],
+          );
+
+          assert.ok(
+            eventsResult.rows.some((row) => row.event_type === "command.summary"),
+          );
+          assert.ok(
+            eventsResult.rows.some((row) => row.event_type === "status.changed"),
+          );
+
+          const sessionResult = await getPool().query(
+            `SELECT runtime_status
+             FROM sessions
+             WHERE id = $1`,
+            [context.sessionId],
+          );
+          assert.equal(sessionResult.rows[0].runtime_status, "completed");
+        } finally {
+          app.workspaceRuntime.off("message.new", handleMessageNew);
+        }
       });
     } finally {
       await cleanupPersistedSessionContext(context);
