@@ -402,6 +402,7 @@ export function SessionPage() {
   const [newTodoTitle, setNewTodoTitle] = useState("");
   const [todoCreating, setTodoCreating] = useState(false);
   const [todoError, setTodoError] = useState<string | null>(null);
+  const [todoPanelCollapsed, setTodoPanelCollapsed] = useState(false);
 
   const [streamEvents, setStreamEvents] = useState<CodexStreamEvent[]>([]);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
@@ -422,8 +423,6 @@ export function SessionPage() {
   const doneTodos = todos.filter((todo) => todo.status === "completed");
   const sortedTodos = [...pendingTodos, ...doneTodos];
   const hasBusyStream = sending || renderedEvents.some((event) => event.spinning);
-  const previewTodos = sortedTodos.slice(0, 4);
-  const hiddenTodoCount = Math.max(sortedTodos.length - previewTodos.length, 0);
   const visibleEvents = renderedEvents.slice(-10);
   const hiddenEventCount = Math.max(renderedEvents.length - visibleEvents.length, 0);
   const showLiveStream = !replayMode && (sending || renderedEvents.length > 0);
@@ -750,7 +749,7 @@ export function SessionPage() {
           </div>
         </GlassCard>
 
-        <div className="session-layout">
+        <div className={`session-layout ${todoPanelCollapsed ? "session-layout--todo-collapsed" : ""}`}>
           <GlassCard className="session-conversation-panel" as="section">
             <div className="session-panel-header">
               <h2 className="session-section-header__title">消息区</h2>
@@ -940,54 +939,77 @@ export function SessionPage() {
           </GlassCard>
 
           <aside className="session-rail">
-            <GlassCard className="session-rail-card" as="section">
+            <GlassCard
+              className={`session-rail-card ${todoPanelCollapsed ? "session-rail-card--collapsed" : ""}`}
+              as="section"
+            >
               <div className="session-section-header session-section-header--compact">
-                <div>
+                <div className="session-rail-card__title-wrap">
                   <h2 className="session-section-header__title">待办</h2>
                 </div>
-                <span className="session-chip">未完成 {pendingTodos.length}</span>
+                <div className="session-rail-card__header-actions">
+                  {!todoPanelCollapsed && <span className="session-chip">未完成 {pendingTodos.length}</span>}
+                  <button
+                    type="button"
+                    className={`session-collapse-toggle ${todoPanelCollapsed ? "session-collapse-toggle--collapsed" : ""}`}
+                    onClick={() => setTodoPanelCollapsed((previous) => !previous)}
+                    aria-label={todoPanelCollapsed ? "展开待办区域" : "收起待办区域"}
+                    aria-expanded={!todoPanelCollapsed}
+                    title={todoPanelCollapsed ? "展开待办区域" : "收起待办区域"}
+                  >
+                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                      <path d="M4.47 6.22a.75.75 0 0 1 1.06 0L8 8.69l2.47-2.47a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 0-1.06Z" />
+                    </svg>
+                  </button>
+                </div>
               </div>
 
-              {todosLoading ? (
-                <div className="session-empty-card session-empty-card--compact">
-                  <div className="session-empty-card__icon">办</div>
-                  <p>待办加载中...</p>
-                </div>
-              ) : previewTodos.length === 0 ? (
-                <div className="session-empty-card session-empty-card--compact">
-                  <div className="session-empty-card__icon">办</div>
-                  <p>还没有待办，可在消息下方快速创建。</p>
-                </div>
-              ) : (
-                <div className="session-todo-preview-list">
-                  {previewTodos.map((todo) => (
-                    <div key={todo.id} className={`session-todo-card ${todo.status === "completed" ? "session-todo-card--done" : ""}`}>
-                      <div className="session-todo-card__top">
-                        <span className={`session-status-pill ${todo.status === "completed" ? "session-status-pill--done" : "session-status-pill--pending"}`}>
-                          {todo.status === "completed" ? "已完成" : "待处理"}
-                        </span>
-                        <button
-                          type="button"
-                          className="session-inline-link"
-                          onClick={() => focusMessage(todo.source_message_id)}
-                        >
-                          定位消息
-                        </button>
-                      </div>
-                      <div className="session-todo-card__title">{todo.title}</div>
-                      <div className="session-todo-card__meta">创建于 {formatDateTime(todo.created_at)}</div>
-                      <button
-                        type="button"
-                        className={`session-button ${todo.status === "pending" ? "session-button--primary" : "session-button--secondary"}`}
-                        onClick={() => void handleToggleTodoStatus(todo)}
-                        disabled={replayMode}
-                      >
-                        {todo.status === "pending" ? "标记完成" : "重新打开"}
-                      </button>
+              {!todoPanelCollapsed && (
+                <div className="session-rail-card__body">
+                  {todosLoading ? (
+                    <div className="session-empty-card session-empty-card--compact">
+                      <div className="session-empty-card__icon">办</div>
+                      <p>待办加载中...</p>
                     </div>
-                  ))}
-                  {hiddenTodoCount > 0 && (
-                    <div className="session-rail-note">还有 {hiddenTodoCount} 项待办未展示，消息区仍可继续创建与定位。</div>
+                  ) : sortedTodos.length === 0 ? (
+                    <div className="session-empty-card session-empty-card--compact">
+                      <div className="session-empty-card__icon">办</div>
+                      <p>还没有待办，可在消息下方快速创建。</p>
+                    </div>
+                  ) : (
+                    <div className="session-todo-preview-list">
+                      {sortedTodos.map((todo) => (
+                        <div
+                          key={todo.id}
+                          className={`session-todo-card ${todo.status === "completed" ? "session-todo-card--done" : ""}`}
+                        >
+                          <div className="session-todo-card__top">
+                            <span className={`session-status-pill ${todo.status === "completed" ? "session-status-pill--done" : "session-status-pill--pending"}`}>
+                              {todo.status === "completed" ? "已完成" : "待处理"}
+                            </span>
+                            <div className="session-todo-card__actions">
+                              <button
+                                type="button"
+                                className="session-inline-link"
+                                onClick={() => focusMessage(todo.source_message_id)}
+                              >
+                                定位消息
+                              </button>
+                            </div>
+                          </div>
+                          <div className="session-todo-card__title">{todo.title}</div>
+                          <div className="session-todo-card__meta">创建于 {formatDateTime(todo.created_at)}</div>
+                          <button
+                            type="button"
+                            className={`session-button ${todo.status === "pending" ? "session-button--primary" : "session-button--secondary"}`}
+                            onClick={() => void handleToggleTodoStatus(todo)}
+                            disabled={replayMode}
+                          >
+                            {todo.status === "pending" ? "标记完成" : "重新打开"}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
               )}
