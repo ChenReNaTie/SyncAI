@@ -3,6 +3,8 @@ import type { SessionRuntimeStatus } from "@syncai/shared";
 import type { Pool } from "pg";
 import { createCodexAgentAdapter } from "./codex-agent-adapter.js";
 import {
+  createMockAgentAdapter,
+  type MockAgentAdapter,
   type MockAgentResult,
   type SendMessageInput,
   type StartSessionInput,
@@ -17,6 +19,8 @@ import {
 type RuntimeLogger = {
   error: (...args: unknown[]) => void;
 };
+
+const AGENT_SENDER_DISPLAY_NAME = "Codex";
 
 interface ClaimedMessage {
   sessionId: string;
@@ -44,7 +48,15 @@ export interface WsMessageEvent {
     id: string;
     content: string;
     sender: string;
+    sender_type: string;
+    sender_user_id: string | null;
+    sender_display_name: string;
     session_id: string;
+    processing_status: string;
+    is_final_reply: boolean;
+    client_message_id: string | null;
+    error_summary: string | null;
+    metadata: Record<string, unknown>;
     created_at: string;
   };
 }
@@ -59,12 +71,19 @@ export function createWorkspaceRuntime(options: {
   logger: RuntimeLogger;
   mockLatencyMs?: number;
   codexPath?: string;
+  useMockAdapter?: boolean;
 }): WorkspaceRuntime {
-  const adapter = createCodexAgentAdapter(
-    options.codexPath !== undefined
-      ? { codexPath: options.codexPath }
-      : undefined,
-  );
+  const adapter: MockAgentAdapter = options.useMockAdapter
+    ? createMockAgentAdapter(
+        options.mockLatencyMs !== undefined
+          ? { latencyMs: options.mockLatencyMs }
+          : {},
+      )
+    : createCodexAgentAdapter(
+        options.codexPath !== undefined
+          ? { codexPath: options.codexPath }
+          : undefined,
+      );
   const emitter = new EventEmitter();
   const activeSessions = new Map<string, Promise<void>>();
 
@@ -203,7 +222,18 @@ export function createWorkspaceRuntime(options: {
            metadata
          )
          VALUES ($1, 'agent', NULL, $2, 'completed', TRUE, $3, NULL, NULL, '{}'::jsonb)
-         RETURNING id`,
+         RETURNING
+           id,
+           session_id,
+           sender_type,
+           sender_user_id,
+           content,
+           processing_status,
+           is_final_reply,
+           client_message_id,
+           error_summary,
+           metadata,
+           created_at`,
         [message.sessionId, result.finalReply, nextSequence],
       );
 
@@ -221,10 +251,28 @@ export function createWorkspaceRuntime(options: {
         sessionId: message.sessionId,
         message: {
           id: agentMessageId,
-          content: result.finalReply,
+          content: String(agentMessageRow.content),
           sender: "agent",
-          session_id: message.sessionId,
-          created_at: new Date().toISOString(),
+          sender_type: "agent",
+          sender_user_id: null,
+          sender_display_name: AGENT_SENDER_DISPLAY_NAME,
+          session_id: String(agentMessageRow.session_id),
+          processing_status: String(agentMessageRow.processing_status),
+          is_final_reply: Boolean(agentMessageRow.is_final_reply),
+          client_message_id:
+            agentMessageRow.client_message_id === null
+              ? null
+              : String(agentMessageRow.client_message_id),
+          error_summary:
+            agentMessageRow.error_summary === null
+              ? null
+              : String(agentMessageRow.error_summary),
+          metadata:
+            agentMessageRow.metadata &&
+            typeof agentMessageRow.metadata === "object"
+              ? (agentMessageRow.metadata as Record<string, unknown>)
+              : {},
+          created_at: new Date(String(agentMessageRow.created_at)).toISOString(),
         },
       });
 

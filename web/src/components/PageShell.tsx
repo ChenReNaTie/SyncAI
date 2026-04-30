@@ -1,4 +1,15 @@
-import { type ReactNode } from "react";
+import { type MouseEvent, type ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
+
+interface BackLocationState {
+  backTo?: BackTarget;
+}
+
+interface BackTarget {
+  label: string;
+  href: string;
+  state?: BackLocationState;
+}
 
 interface PageShellProps {
   children: ReactNode;
@@ -6,7 +17,7 @@ interface PageShellProps {
   /** Title shown in page header */
   title?: string;
   /** Optional back navigation link */
-  backTo?: { label: string; href: string };
+  backTo?: BackTarget;
   /** Optional right-side actions in header */
   actions?: ReactNode;
   /** Full-height mode for pages like SessionPage */
@@ -21,10 +32,21 @@ export function PageShell({
   actions,
   fullHeight = false,
 }: PageShellProps) {
+  const navigate = useNavigate();
+
+  const handleBackClick = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (!backTo) {
+      return;
+    }
+
+    event.preventDefault();
+    navigate(backTo.href, backTo.state ? { state: backTo.state } : undefined);
+  };
+
   return (
     <main
-      className={`mx-auto w-full max-w-[1100px] px-4 sm:px-6 pb-16 ${
-        fullHeight ? "flex flex-col h-screen overflow-hidden" : "pt-8 sm:pt-12"
+      className={`mx-auto w-full max-w-[1240px] px-4 sm:px-6 ${
+        fullHeight ? "flex h-screen flex-col pt-3 sm:pt-4 pb-4" : "pt-8 sm:pt-12 pb-16"
       } ${className}`}
     >
       {(title || backTo || actions) && (
@@ -37,6 +59,7 @@ export function PageShell({
             {backTo && (
               <a
                 href={backTo.href}
+                onClick={handleBackClick}
                 className="text-text-muted hover:text-text-secondary transition-colors text-sm flex items-center gap-1 shrink-0"
               >
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">

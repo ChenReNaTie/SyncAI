@@ -72,6 +72,8 @@ const searchCursorSchema = z.object({
   q: z.string(),
 });
 
+const AGENT_SENDER_DISPLAY_NAME = "Codex";
+
 function asIso(value: unknown) {
   if (!value) {
     return null;
@@ -259,12 +261,23 @@ function serializeSession(row: Record<string, unknown>) {
 }
 
 function serializeMessage(row: Record<string, unknown>) {
+  const senderType = String(row.sender_type);
+  const senderDisplayName =
+    senderType === "member" &&
+    typeof row.sender_display_name === "string" &&
+    row.sender_display_name.trim().length > 0
+      ? row.sender_display_name
+      : senderType === "member"
+        ? "Unknown member"
+        : AGENT_SENDER_DISPLAY_NAME;
+
   return {
     id: row.id,
     session_id: row.session_id,
-    sender: row.sender_type === 'member' ? 'user' : 'agent',
+    sender: senderType === "member" ? "user" : "agent",
     sender_type: row.sender_type,
     sender_user_id: row.sender_user_id,
+    sender_display_name: senderDisplayName,
     content: row.content,
     processing_status: row.processing_status,
     is_final_reply: Boolean(row.is_final_reply),
@@ -273,6 +286,25 @@ function serializeMessage(row: Record<string, unknown>) {
     metadata: row.metadata ?? {},
     created_at: asIso(row.created_at),
   };
+}
+
+function buildMessageSelectColumns(
+  messageAlias: string,
+  userAlias: string,
+) {
+  return `
+         ${messageAlias}.id,
+         ${messageAlias}.session_id,
+         ${messageAlias}.sender_type,
+         ${messageAlias}.sender_user_id,
+         ${userAlias}.display_name AS sender_display_name,
+         ${messageAlias}.content,
+         ${messageAlias}.processing_status,
+         ${messageAlias}.is_final_reply,
+         ${messageAlias}.client_message_id,
+         ${messageAlias}.error_summary,
+         ${messageAlias}.metadata,
+         ${messageAlias}.created_at`;
 }
 
 function serializeTodo(row: Record<string, unknown>) {
@@ -1039,24 +1071,15 @@ export async function registerWorkspaceRoutes(
 
     const result = await app.db.query(
       `SELECT
-         id,
-         session_id,
-         sender_type,
-         sender_user_id,
-         content,
-         processing_status,
-         is_final_reply,
-         client_message_id,
-         error_summary,
-         metadata,
-         created_at
-       FROM messages
-       WHERE session_id = $1
+${buildMessageSelectColumns("m", "u")}
+       FROM messages m
+       LEFT JOIN users u ON u.id = m.sender_user_id
+       WHERE m.session_id = $1
          AND (
-           sender_type = 'member'
-           OR (sender_type = 'agent' AND is_final_reply = TRUE)
+           m.sender_type = 'member'
+           OR (m.sender_type = 'agent' AND m.is_final_reply = TRUE)
          )
-       ORDER BY sequence_no ASC`,
+       ORDER BY m.sequence_no ASC`,
       [params.data.sessionId],
     );
 
@@ -1121,20 +1144,11 @@ export async function registerWorkspaceRoutes(
       if (body.data.client_message_id) {
         const existing = await client.query(
           `SELECT
-             id,
-             session_id,
-             sender_type,
-             sender_user_id,
-             content,
-             processing_status,
-             is_final_reply,
-             client_message_id,
-             error_summary,
-             metadata,
-             created_at
-           FROM messages
-           WHERE session_id = $1
-             AND client_message_id = $2
+${buildMessageSelectColumns("m", "u")}
+           FROM messages m
+           LEFT JOIN users u ON u.id = m.sender_user_id
+           WHERE m.session_id = $1
+             AND m.client_message_id = $2
            LIMIT 1`,
           [params.data.sessionId, body.data.client_message_id],
         );
@@ -1173,30 +1187,36 @@ export async function registerWorkspaceRoutes(
       const processingStatus = hasPendingMessages ? "queued" : "accepted";
 
       const messageResult = await client.query(
-        `INSERT INTO messages (
-           session_id,
-           sender_type,
-           sender_user_id,
-           content,
-           processing_status,
-           is_final_reply,
-           sequence_no,
-           client_message_id,
-           metadata
+        `WITH inserted AS (
+           INSERT INTO messages (
+             session_id,
+             sender_type,
+             sender_user_id,
+             content,
+             processing_status,
+             is_final_reply,
+             sequence_no,
+             client_message_id,
+             metadata
+           )
+           VALUES ($1, 'member', $2, $3, $4, FALSE, $5, $6, '{}'::jsonb)
+           RETURNING
+             id,
+             session_id,
+             sender_type,
+             sender_user_id,
+             content,
+             processing_status,
+             is_final_reply,
+             client_message_id,
+             error_summary,
+             metadata,
+             created_at
          )
-         VALUES ($1, 'member', $2, $3, $4, FALSE, $5, $6, '{}'::jsonb)
-         RETURNING
-           id,
-           session_id,
-           sender_type,
-           sender_user_id,
-           content,
-           processing_status,
-           is_final_reply,
-           client_message_id,
-           error_summary,
-           metadata,
-           created_at`,
+         SELECT
+${buildMessageSelectColumns("inserted", "u")}
+         FROM inserted
+         LEFT JOIN users u ON u.id = inserted.sender_user_id`,
         [
           params.data.sessionId,
           actorUserId,
@@ -1261,20 +1281,11 @@ export async function registerWorkspaceRoutes(
       ) {
         const existing = await app.db.query(
           `SELECT
-             id,
-             session_id,
-             sender_type,
-             sender_user_id,
-             content,
-             processing_status,
-             is_final_reply,
-             client_message_id,
-             error_summary,
-             metadata,
-             created_at
-           FROM messages
-           WHERE session_id = $1
-             AND client_message_id = $2
+${buildMessageSelectColumns("m", "u")}
+           FROM messages m
+           LEFT JOIN users u ON u.id = m.sender_user_id
+           WHERE m.session_id = $1
+             AND m.client_message_id = $2
            LIMIT 1`,
           [params.data.sessionId, body.data.client_message_id],
         );

@@ -9,6 +9,10 @@
  *   - Inbound:  { type: "stream.event", data: { sessionId, event: StreamEvent } }
  */
 
+import {
+  getStoredAccessToken,
+  refreshAccessToken,
+} from "./client.js";
 import type { Message } from "./client.js";
 
 export interface SocketMessageEvent {
@@ -18,7 +22,13 @@ export interface SocketMessageEvent {
       id: string;
       content: string;
       sender: string;
+      sender_type?: "member" | "agent";
+      sender_user_id?: string | null;
+      sender_display_name?: string;
       session_id: string;
+      processing_status?: string;
+      is_final_reply?: boolean;
+      metadata?: Record<string, unknown>;
       created_at: string;
     };
   };
@@ -55,8 +65,21 @@ export interface SessionSocket {
   close(): void;
 }
 
+function buildSocketUrl(token: string) {
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const wsHost = window.location.host;
+  return `${protocol}://${wsHost}/api/v1/ws?token=${encodeURIComponent(token)}`;
+}
+
+async function resolveSocketAccessToken(forceRefresh = false) {
+  if (forceRefresh) {
+    return refreshAccessToken();
+  }
+
+  return getStoredAccessToken() ?? refreshAccessToken();
+}
+
 export function createSessionSocket(
-  token: string,
   handlers: {
     onMessage: (msg: Message) => void;
     onStatusChanged: (status: string) => void;
@@ -67,86 +90,145 @@ export function createSessionSocket(
   /** If provided, the socket auto-subscribes to this session as soon as it opens. */
   autoSubscribeSessionId?: string,
 ): SessionSocket {
-  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  // In dev mode, connect through Vite proxy (which now has ws: true).
-  // In production, connect to the same host (Nginx or direct).
-  const wsHost = window.location.host;
-  const url = `${protocol}://${wsHost}/api/v1/ws?token=${encodeURIComponent(token)}`;
-  const ws = new WebSocket(url);
+  let ws: WebSocket | null = null;
+  let closed = false;
+  let reconnecting = false;
+  const subscriptions = new Set<string>();
 
-  // Track pending subscriptions that arrive before the socket opens.
-  const pendingSubscriptions: string[] = [];
   if (autoSubscribeSessionId) {
-    pendingSubscriptions.push(autoSubscribeSessionId);
+    subscriptions.add(autoSubscribeSessionId);
   }
 
-  // Whether close() was called — used to avoid racing CONNECTING → OPEN.
-  let closed = false;
-
-  ws.addEventListener("open", () => {
-    // If close() was called while the socket was CONNECTING, shut it down now.
+  const connect = async (forceRefresh = false) => {
     if (closed) {
-      ws.close();
       return;
     }
-    // Flush any pending subscriptions.
-    for (const sid of pendingSubscriptions) {
-      ws.send(JSON.stringify({ type: "subscribe", sessionId: sid }));
+
+    const token = await resolveSocketAccessToken(forceRefresh);
+    if (!token || closed) {
+      handlers.onClose?.(new CloseEvent("close", {
+        code: 4001,
+        reason: "Authentication unavailable",
+      }));
+      return;
     }
-    pendingSubscriptions.length = 0;
-  });
 
-  ws.addEventListener("message", (event: MessageEvent) => {
-    try {
-      const payload = JSON.parse(event.data) as SocketEvent;
+    const socket = new WebSocket(buildSocketUrl(token));
+    ws = socket;
 
-      if (payload.type === "message.new" && payload.data?.message) {
-        const raw = payload.data.message;
-        const msg: Message = {
-          id: raw.id,
-          content: raw.content,
-          sender: raw.sender,
-          session_id: raw.session_id,
-          created_at: raw.created_at,
-        };
-        handlers.onMessage(msg);
+    socket.addEventListener("open", () => {
+      if (closed || socket !== ws) {
+        socket.close();
+        return;
       }
 
-      if (payload.type === "status.changed" && payload.data?.runtime_status) {
-        handlers.onStatusChanged(payload.data.runtime_status);
+      for (const sessionId of subscriptions) {
+        socket.send(JSON.stringify({ type: "subscribe", sessionId }));
+      }
+    });
+
+    socket.addEventListener("message", (event: MessageEvent) => {
+      try {
+        const payload = JSON.parse(event.data) as SocketEvent;
+
+        if (payload.type === "message.new" && payload.data?.message) {
+          const raw = payload.data.message;
+          const msg: Message = {
+            id: raw.id,
+            content: raw.content,
+            sender: raw.sender,
+            session_id: raw.session_id,
+            created_at: raw.created_at,
+            ...(raw.sender_type !== undefined
+              ? { sender_type: raw.sender_type }
+              : {}),
+            ...(raw.sender_user_id !== undefined
+              ? { sender_user_id: raw.sender_user_id }
+              : {}),
+            ...(raw.sender_display_name !== undefined
+              ? { sender_display_name: raw.sender_display_name }
+              : {}),
+            ...(raw.processing_status !== undefined
+              ? { processing_status: raw.processing_status }
+              : {}),
+            ...(raw.is_final_reply !== undefined
+              ? { is_final_reply: raw.is_final_reply }
+              : {}),
+            ...(raw.metadata !== undefined
+              ? { metadata: raw.metadata }
+              : {}),
+          };
+          handlers.onMessage(msg);
+        }
+
+        if (payload.type === "status.changed" && payload.data?.runtime_status) {
+          handlers.onStatusChanged(payload.data.runtime_status);
+        }
+
+        if (payload.type === "stream.event" && payload.data?.event) {
+          handlers.onStreamEvent?.(payload.data.event);
+        }
+      } catch {
+        // ignore non-JSON frames
+      }
+    });
+
+    socket.addEventListener("error", (event: Event) => {
+      if (socket !== ws) {
+        return;
+      }
+      handlers.onError?.(event);
+    });
+
+    socket.addEventListener("close", (event: CloseEvent) => {
+      if (socket !== ws) {
+        return;
       }
 
-      if (payload.type === "stream.event" && payload.data?.event) {
-        handlers.onStreamEvent?.(payload.data.event);
+      ws = null;
+
+      if (closed) {
+        handlers.onClose?.(event);
+        return;
       }
-    } catch {
-      // ignore non-JSON frames
-    }
-  });
 
-  ws.addEventListener("error", (event: Event) => {
-    handlers.onError?.(event);
-  });
+      if (event.code === 4001 && !reconnecting) {
+        reconnecting = true;
+        void (async () => {
+          try {
+            const nextToken = await refreshAccessToken();
+            if (!nextToken || closed) {
+              handlers.onClose?.(event);
+              return;
+            }
+            await connect(false);
+          } finally {
+            reconnecting = false;
+          }
+        })();
+        return;
+      }
 
-  ws.addEventListener("close", (event: CloseEvent) => {
-    handlers.onClose?.(event);
-  });
+      handlers.onClose?.(event);
+    });
+  };
+
+  void connect(false);
 
   return {
     subscribe(sessionId: string) {
-      if (ws.readyState === WebSocket.OPEN) {
+      subscriptions.add(sessionId);
+      if (ws?.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "subscribe", sessionId }));
-      } else {
-        // Socket not open yet — queue for later delivery.
-        pendingSubscriptions.push(sessionId);
       }
     },
     close() {
       closed = true;
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CLOSING) {
+      reconnecting = false;
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         ws.close();
       }
-      // If still CONNECTING the open handler will close it.
+      ws = null;
     },
   };
 }

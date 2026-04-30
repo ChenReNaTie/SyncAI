@@ -1,6 +1,19 @@
 import { useState, useEffect } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { getTeam, getProjects, createProject, getAgentNode, upsertAgentNode, addTeamMember, getTeamMembers, type AgentNode, type TeamMember } from "../api/client.js";
+import {
+  addTeamMember,
+  clearAuthSession,
+  createProject,
+  getAgentNode,
+  getProjects,
+  getStoredAuthToken,
+  getTeam,
+  getTeamMembers,
+  hasStoredAuthSession,
+  upsertAgentNode,
+  type AgentNode,
+  type TeamMember,
+} from "../api/client.js";
 import { PageShell, GlassCard, Button, Input, Badge, PageLoading } from "../components/index.js";
 
 interface TeamDetail {
@@ -16,6 +29,19 @@ interface Project {
   description: string;
   team_id: string;
   created_at: string;
+}
+
+function formatConnectionStatus(status: string) {
+  switch (status) {
+    case "online":
+      return "在线";
+    case "offline":
+      return "离线";
+    case "idle":
+      return "空闲";
+    default:
+      return status;
+  }
 }
 
 export function TeamPage() {
@@ -54,10 +80,10 @@ export function TeamPage() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
-  const token = localStorage.getItem("token");
+  const token = getStoredAuthToken();
 
   useEffect(() => {
-    if (!token) { navigate("/login"); return; }
+    if (!token && !hasStoredAuthSession()) { navigate("/login"); return; }
     if (!teamId) { navigate("/dashboard"); return; }
     loadTeamData();
   }, [teamId, token, navigate]);
@@ -95,9 +121,9 @@ export function TeamPage() {
       }
     } catch (err: any) {
       if (err.message === "UNAUTHORIZED" || err.message.includes("401")) {
-        localStorage.removeItem("token"); navigate("/login"); return;
+        clearAuthSession(); navigate("/login"); return;
       }
-      setError(err.message || "Failed to load team data");
+      setError(err.message || "加载团队数据失败");
     } finally {
       setLoading(false);
     }
@@ -106,7 +132,7 @@ export function TeamPage() {
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!projectName.trim()) {
-      setCreateError("Project name is required");
+      setCreateError("项目名称不能为空");
       return;
     }
     try {
@@ -120,7 +146,7 @@ export function TeamPage() {
       const projectsRes = await getProjects(token!, teamId!);
       setProjects(projectsRes.data);
     } catch (err: any) {
-      setCreateError(err.message || "Failed to create project");
+      setCreateError(err.message || "创建项目失败");
     } finally {
       setCreating(false);
     }
@@ -129,7 +155,7 @@ export function TeamPage() {
   const handleConfigureAgentNode = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!nodeDisplayName.trim()) {
-      setAgentNodeError("Display name is required");
+      setAgentNodeError("节点名称不能为空");
       return;
     }
     try {
@@ -141,7 +167,7 @@ export function TeamPage() {
       setNodeDisplayName("");
       setShowAgentNodeForm(false);
     } catch (err: any) {
-      setAgentNodeError(err.message || "Failed to configure agent node");
+      setAgentNodeError(err.message || "配置助手节点失败");
     } finally {
       setNodeConfiguring(false);
     }
@@ -182,11 +208,11 @@ export function TeamPage() {
     }
   };
 
-  if (loading) return <PageLoading label="Loading team..." />;
+  if (loading) return <PageLoading label="加载团队中..." />;
 
   if (error) {
     return (
-      <PageShell title="Error" backTo={{ label: "返回 Dashboard", href: "/dashboard" }}>
+      <PageShell title="错误" backTo={{ label: "返回仪表盘", href: "/dashboard" }}>
         <GlassCard>
           <p className="text-danger">{error}</p>
         </GlassCard>
@@ -196,8 +222,8 @@ export function TeamPage() {
 
   return (
     <PageShell
-      title={team?.name ?? "Team"}
-      backTo={{ label: "返回 Dashboard", href: "/dashboard" }}
+      title={team?.name ?? "团队"}
+      backTo={{ label: "返回仪表盘", href: "/dashboard" }}
     >
       {/* Team Info */}
       <GlassCard className="mb-6">
@@ -215,7 +241,7 @@ export function TeamPage() {
         <div className="mt-4 pt-4 border-t border-glass-border">
           <div className="flex items-center justify-between">
             <div>
-              <h4 className="text-sm font-semibold text-text-primary">Agent 节点</h4>
+              <h4 className="text-sm font-semibold text-text-primary">助手节点</h4>
               {agentNode ? (
                 <div className="flex items-center gap-2 mt-1">
                   <span
@@ -228,7 +254,7 @@ export function TeamPage() {
                   <span className="text-sm text-text-secondary">
                     {agentNode.display_name}
                     {" · "}
-                    {agentNode.connection_status}
+                    {formatConnectionStatus(agentNode.connection_status)}
                   </span>
                 </div>
               ) : (
@@ -433,7 +459,17 @@ export function TeamPage() {
         ) : (
           <div className="grid gap-3 sm:grid-cols-2">
             {projects.map((project) => (
-              <Link key={project.id} to={`/projects/${project.id}`} className="block">
+              <Link
+                key={project.id}
+                to={`/projects/${project.id}`}
+                state={{
+                  backTo: {
+                    label: "返回团队",
+                    href: `/teams/${teamId}`,
+                  },
+                }}
+                className="block"
+              >
                 <div className="p-4 rounded-lg bg-surface-2 border border-glass-border hover:border-accent/30 hover:bg-glass-hover transition-all duration-200 group">
                   <h4 className="font-semibold text-text-primary group-hover:text-accent-light transition-colors">
                     {project.name}

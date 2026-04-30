@@ -70,6 +70,7 @@ export interface Message {
   sessionId: string;
   senderType: SenderType;
   senderUserId?: string | null;
+  senderDisplayName: string;
   content: string;
   processingStatus: MessageProcessingStatus;
   isFinalReply: boolean;

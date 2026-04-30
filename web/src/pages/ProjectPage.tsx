@@ -1,6 +1,12 @@
 import { useState, useEffect } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
-import { getSessions, createSession } from "../api/client.js";
+import { useParams, useNavigate, useLocation, Link } from "react-router-dom";
+import {
+  clearAuthSession,
+  createSession,
+  getSessions,
+  getStoredAuthToken,
+  hasStoredAuthSession,
+} from "../api/client.js";
 import { PageShell, GlassCard, Button, Input, Badge, PageLoading } from "../components/index.js";
 
 interface Session {
@@ -12,9 +18,22 @@ interface Session {
   updated_at: string;
 }
 
+interface BackTarget {
+  label: string;
+  href: string;
+  state?: {
+    backTo?: BackTarget;
+  };
+}
+
+interface PageLocationState {
+  backTo?: BackTarget;
+}
+
 export function ProjectPage() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
@@ -27,10 +46,15 @@ export function ProjectPage() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
-  const token = localStorage.getItem("token");
+  const token = getStoredAuthToken();
+  const locationState = location.state as PageLocationState | null;
+  const projectBackTo = locationState?.backTo ?? {
+    label: "返回仪表盘",
+    href: "/dashboard",
+  };
 
   useEffect(() => {
-    if (!token) { navigate("/login"); return; }
+    if (!token && !hasStoredAuthSession()) { navigate("/login"); return; }
     if (!projectId) { navigate("/dashboard"); return; }
     loadSessions();
   }, [projectId, token, navigate, visibilityFilter]);
@@ -46,9 +70,9 @@ export function ProjectPage() {
       setSessions(res.data);
     } catch (err: any) {
       if (err.message === "UNAUTHORIZED" || err.message.includes("401")) {
-        localStorage.removeItem("token"); navigate("/login"); return;
+        clearAuthSession(); navigate("/login"); return;
       }
-      setError(err.message || "Failed to load sessions");
+      setError(err.message || "加载会话列表失败");
     } finally {
       setLoading(false);
     }
@@ -57,7 +81,7 @@ export function ProjectPage() {
   const handleCreateSession = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!sessionTitle.trim()) {
-      setCreateError("Session title is required");
+      setCreateError("会话标题不能为空");
       return;
     }
     try {
@@ -73,17 +97,17 @@ export function ProjectPage() {
       const res = await getSessions(token!, projectId!, params);
       setSessions(res.data);
     } catch (err: any) {
-      setCreateError(err.message || "Failed to create session");
+      setCreateError(err.message || "创建会话失败");
     } finally {
       setCreating(false);
     }
   };
 
-  if (loading) return <PageLoading label="Loading sessions..." />;
+  if (loading) return <PageLoading label="加载会话列表中..." />;
 
   if (error) {
     return (
-      <PageShell title="Error" backTo={{ label: "返回 Dashboard", href: "/dashboard" }}>
+      <PageShell title="错误" backTo={projectBackTo}>
         <GlassCard>
           <p className="text-danger">{error}</p>
         </GlassCard>
@@ -94,12 +118,12 @@ export function ProjectPage() {
   return (
     <PageShell
       title="会话列表"
-      backTo={{ label: "返回 Dashboard", href: "/dashboard" }}
+      backTo={projectBackTo}
     >
       <GlassCard>
         <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
           <div className="flex items-center gap-3">
-            <h3 className="text-lg font-semibold text-text-primary">所有会话</h3>
+            <h3 className="text-lg font-semibold text-text-primary">全部会话</h3>
             <select
               value={visibilityFilter}
               onChange={(e) => setVisibilityFilter(e.target.value)}
@@ -156,14 +180,27 @@ export function ProjectPage() {
         ) : (
           <div className="grid gap-3 sm:grid-cols-2">
             {sessions.map((session) => (
-              <Link key={session.id} to={`/sessions/${session.id}`} className="block">
+              <Link
+                key={session.id}
+                to={`/sessions/${session.id}`}
+                state={{
+                  backTo: {
+                    label: "返回会话列表",
+                    href: `/projects/${projectId}`,
+                    state: {
+                      backTo: projectBackTo,
+                    },
+                  },
+                }}
+                className="block"
+              >
                 <div className="p-4 rounded-lg bg-surface-2 border border-glass-border hover:border-accent/30 hover:bg-glass-hover transition-all duration-200 group">
                   <div className="flex items-center gap-2 mb-1">
                     <h4 className="font-semibold text-text-primary group-hover:text-accent-light transition-colors">
                       {session.title}
                     </h4>
                     <Badge variant={session.visibility === "shared" ? "success" : "default"}>
-                      {session.visibility}
+                      {session.visibility === "shared" ? "共享" : "私有"}
                     </Badge>
                   </div>
                   <p className="text-xs text-text-muted mt-1">

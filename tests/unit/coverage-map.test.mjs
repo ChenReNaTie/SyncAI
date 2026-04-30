@@ -16,7 +16,10 @@ test("the executable test manifest covers all 40 reviewed cases and documented g
     assert.ok(mappedCases.has(caseId), `${caseId} is not mapped into any documented automated group`);
   }
 
-  const testingDoc = readFileSync("docs/测试脚本设计.md", "utf8");
+  const testingDoc = readFileSync(
+    "docs/03-开发与测试/测试脚本设计.md",
+    "utf8",
+  );
   for (const group of documentedAutomatedGroups) {
     assert.match(testingDoc, new RegExp(group.id));
   }

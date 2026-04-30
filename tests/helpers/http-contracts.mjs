@@ -97,12 +97,17 @@ export function assertProjectContract(project, expected = {}) {
     "name",
     "team_id",
     "updated_at",
+    "working_directory",
   ]);
   assertUuid(project.id);
   assertUuid(project.team_id);
   assertUuid(project.created_by);
   assert.equal(typeof project.name, "string");
   assert.ok(project.description === null || typeof project.description === "string");
+  assert.ok(
+    project.working_directory === null ||
+      typeof project.working_directory === "string",
+  );
   assertNullableIsoTimestamp(project.archived_at);
   assertIsoTimestamp(project.created_at);
   assertIsoTimestamp(project.updated_at);
@@ -210,8 +215,10 @@ export function assertMessageContract(message, expected = {}) {
   assertStrictKeys(message, [
     "id",
     "session_id",
+    "sender",
     "sender_type",
     "sender_user_id",
+    "sender_display_name",
     "content",
     "processing_status",
     "is_final_reply",
@@ -222,11 +229,18 @@ export function assertMessageContract(message, expected = {}) {
   ]);
   assertUuid(message.id);
   assertUuid(message.session_id);
+  assert.ok(["user", "agent"].includes(message.sender));
   assert.ok(["member", "agent"].includes(message.sender_type));
+  assert.equal(
+    message.sender,
+    message.sender_type === "member" ? "user" : "agent",
+  );
   assert.ok(message.sender_user_id === null || typeof message.sender_user_id === "string");
   if (message.sender_user_id !== null) {
     assertUuid(message.sender_user_id);
   }
+  assert.equal(typeof message.sender_display_name, "string");
+  assert.ok(message.sender_display_name.length > 0);
   assert.equal(typeof message.content, "string");
   assert.ok(
     ["accepted", "queued", "running", "completed", "failed"].includes(

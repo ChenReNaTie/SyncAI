@@ -29,7 +29,7 @@ export function Spinner({ size = "md", label, className = "" }: SpinnerProps) {
 }
 
 /** Full-page loading state */
-export function PageLoading({ label = "Loading..." }: { label?: string }) {
+export function PageLoading({ label = "加载中..." }: { label?: string }) {
   return (
     <main className="flex items-center justify-center min-h-screen">
       <Spinner size="lg" label={label} />

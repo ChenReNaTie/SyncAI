@@ -19,7 +19,7 @@ export function GlassCard({
 }: GlassCardProps) {
   const base = [
     "bg-glass backdrop-blur-xl border border-glass-border rounded-card",
-    "shadow-card transition-all duration-300",
+    "shadow-card transition-all duration-300 text-text-primary",
     "p-6",
   ];
   if (hover) base.push("hover:bg-glass-hover hover:border-glass-border-hover hover:shadow-card-hover cursor-pointer");

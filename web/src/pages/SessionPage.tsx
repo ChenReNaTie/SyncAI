@@ -1,22 +1,20 @@
-import { useState, useEffect, useRef } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
-  getSessionDetail,
-  getMessages,
-  sendMessage,
-  getReplay,
-  getTodos,
+  clearAuthSession,
   createTodo,
+  getMessages,
+  getReplay,
+  getSessionDetail,
+  getStoredAuthToken,
+  getTodos,
+  hasStoredAuthSession,
+  sendMessage,
   updateTodoStatus,
 } from "../api/client.js";
+import type { Message, ReplayEntry, SessionDetail, Todo, TodoStatus } from "../api/client.js";
 import { createSessionSocket } from "../api/socket.js";
-import type { SocketStreamEvent } from "../api/socket.js";
-import type { SessionDetail, Message, Todo, TodoStatus } from "../api/client.js";
-import { PageShell, GlassCard, Button, Input, Badge, PageLoading } from "../components/index.js";
-
-/* ------------------------------------------------------------------ */
-/*  Stream event types (mirrors Codex SDK ThreadEvent / ThreadItem)    */
-/* ------------------------------------------------------------------ */
+import { Badge, GlassCard, PageLoading, PageShell } from "../components/index.js";
 
 interface CodexStreamEvent {
   type: string;
@@ -33,19 +31,45 @@ type ItemType =
   | "todo_list"
   | "error";
 
-/* ------------------------------------------------------------------ */
-/*  Stream-event → UI helper                                           */
-/* ------------------------------------------------------------------ */
+type StreamTone = "neutral" | "accent" | "success" | "danger" | "warning";
 
 interface RenderedEvent {
   id: string;
   icon: string;
   text: string;
-  color: string;
+  tone: StreamTone;
   spinning: boolean;
 }
 
-let _eventSeq = 0;
+interface MessagePresenter {
+  id: string;
+  label: string;
+  secondaryLabel: string;
+  avatarText: string;
+  tone: "human" | "agent";
+}
+
+type MessageWithAuthor = Message & {
+  sender_display_name?: string;
+  sender_user_id?: string;
+  sender_role?: string;
+  author_name?: string;
+  author_id?: string;
+};
+
+interface BackTarget {
+  label: string;
+  href: string;
+  state?: {
+    backTo?: BackTarget;
+  };
+}
+
+interface PageLocationState {
+  backTo?: BackTarget;
+}
+
+let eventSequence = 0;
 
 function resolveDisplayedCodexThreadId(session: SessionDetail | null) {
   const ref = session?.bound_agent_session_ref?.trim();
@@ -60,28 +84,127 @@ function resolveDisplayedCodexThreadId(session: SessionDetail | null) {
   return ref;
 }
 
-function renderStreamEvent(ev: CodexStreamEvent): RenderedEvent | null {
-  const d = ev.data ?? {};
-  const data = d as Record<string, unknown>;
+function isAgentSender(sender: string) {
+  return sender === "agent" || sender === "ai";
+}
+
+function formatRuntimeStatus(status: string) {
+  switch (status) {
+    case "queued":
+      return "排队中";
+    case "pending":
+      return "等待中";
+    case "running":
+    case "in_progress":
+      return "处理中";
+    case "completed":
+      return "已完成";
+    case "failed":
+      return "失败";
+    case "idle":
+      return "空闲";
+    case "online":
+      return "在线";
+    case "offline":
+      return "离线";
+    default:
+      return status;
+  }
+}
+
+function formatClock(value: string) {
+  return new Date(value).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatDateTime(value: string) {
+  return new Date(value).toLocaleString([], {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function getInitials(label: string) {
+  const letters = Array.from(label.trim()).filter((char) => char !== " ");
+  if (letters.length === 0) {
+    return "成员";
+  }
+
+  return letters.slice(0, 2).join("").toUpperCase();
+}
+
+function getMessagePresenter(message: Message): MessagePresenter {
+  const enriched = message as MessageWithAuthor;
+  const agent = isAgentSender(message.sender);
+  const label = enriched.sender_display_name
+    ?? enriched.author_name
+    ?? (agent ? "协作助手" : message.sender === "user" ? "团队成员" : message.sender);
+
+  const secondaryLabel = agent
+    ? "助手回复"
+    : enriched.sender_role === "admin"
+      ? "管理员"
+      : enriched.sender_role === "member"
+        ? "协作成员"
+        : "共享会话成员";
+
+  return {
+    id: enriched.sender_user_id ?? enriched.author_id ?? label,
+    label,
+    secondaryLabel,
+    avatarText: agent ? "助手" : getInitials(label),
+    tone: agent ? "agent" : "human",
+  };
+}
+
+function mapReplayEntryToMessage(entry: ReplayEntry, index: number): Message {
+  if (entry.entry_type === "message") {
+    return {
+      id: entry.message_id,
+      content: entry.content,
+      sender: entry.sender_type === "agent" ? "agent" : "user",
+      sender_type: entry.sender_type,
+      sender_display_name: entry.sender_type === "agent" ? "历史助手" : "历史成员",
+      session_id: `replay-${index}`,
+      created_at: entry.occurred_at,
+    };
+  }
+
+  return {
+    id: `replay-${entry.entry_type}-${index}`,
+    content: entry.summary,
+    sender: "agent",
+    sender_type: "agent",
+    sender_display_name: "系统记录",
+    session_id: `replay-${index}`,
+    created_at: entry.occurred_at,
+  };
+}
+
+function renderStreamEvent(event: CodexStreamEvent): RenderedEvent | null {
+  const data = event.data ?? {};
   const item = data.item as Record<string, unknown> | undefined;
 
-  switch (ev.type) {
-    // ── Thread-level events ──
+  switch (event.type) {
     case "thread.started":
       return {
-        id: `th-${++_eventSeq}`,
-        icon: "🧵",
-        text: `Thread started: ${String(data.thread_id ?? "—")}`,
-        color: "text-text-muted",
+        id: `thread-${++eventSequence}`,
+        icon: "线",
+        text: `已创建线程：${String(data.thread_id ?? "-")}`,
+        tone: "neutral",
         spinning: false,
       };
 
     case "turn.started":
       return {
-        id: `ts-${++_eventSeq}`,
-        icon: "🔄",
-        text: "Turn started",
-        color: "text-text-muted",
+        id: `turn-started-${++eventSequence}`,
+        icon: "流",
+        text: "开始处理这一轮消息",
+        tone: "accent",
         spinning: true,
       };
 
@@ -91,39 +214,37 @@ function renderStreamEvent(ev: CodexStreamEvent): RenderedEvent | null {
       const cached = usage?.cached_input_tokens ?? 0;
       const output = usage?.output_tokens ?? 0;
       return {
-        id: `tc-${++_eventSeq}`,
-        icon: "📊",
-        text: `Turn completed — ${input + output} tokens (in: ${input}, cached: ${cached}, out: ${output})`,
-        color: "text-accent-light",
+        id: `turn-completed-${++eventSequence}`,
+        icon: "算",
+        text: `处理完成：输入 ${input} / 缓存 ${cached} / 输出 ${output}`,
+        tone: "success",
         spinning: false,
       };
     }
 
     case "turn.failed": {
-      const errMsg =
+      const errorMessage =
         data.error && typeof data.error === "object"
           ? (data.error as Record<string, unknown>).message
-          : "Unknown error";
+          : "未知错误";
       return {
-        id: `tf-${++_eventSeq}`,
-        icon: "❌",
-        text: `Turn failed: ${String(errMsg)}`,
-        color: "text-danger",
+        id: `turn-failed-${++eventSequence}`,
+        icon: "错",
+        text: `处理失败：${String(errorMessage)}`,
+        tone: "danger",
         spinning: false,
       };
     }
 
-    // ── Error event (stream-level) ──
     case "error":
       return {
-        id: `err-${++_eventSeq}`,
-        icon: "⚠️",
-        text: `Error: ${String(data.message ?? "Unknown")}`,
-        color: "text-danger",
+        id: `stream-error-${++eventSequence}`,
+        icon: "告",
+        text: `流事件异常：${String(data.message ?? "未知错误")}`,
+        tone: "danger",
         spinning: false,
       };
 
-    // ── Item events ──
     case "item.started":
       return renderItemRow("started", item);
     case "item.updated":
@@ -140,57 +261,66 @@ function renderItemRow(
   phase: "started" | "updated" | "completed",
   item: Record<string, unknown> | undefined,
 ): RenderedEvent | null {
-  if (!item) return null;
+  if (!item) {
+    return null;
+  }
 
-  const id = String(item.id ?? ++_eventSeq);
+  const id = String(item.id ?? ++eventSequence);
   const itemType = String(item.type ?? "") as ItemType;
   const status = String(item.status ?? "");
   const spinning = status === "in_progress";
-
-  const itemId = `${itemType}-${id}-${phase}`;
+  const rowId = `${itemType}-${id}-${phase}`;
 
   switch (itemType) {
     case "command_execution": {
-      const command = String(item.command ?? "").slice(0, 80);
+      const command = String(item.command ?? "").slice(0, 100);
       const exitCode = item.exit_code != null ? Number(item.exit_code) : undefined;
-      const isOk = exitCode === 0;
+      const ok = exitCode === 0;
 
-      if (status === "completed" && isOk) {
-        return { id: itemId, icon: "✓", text: command, color: "text-success", spinning: false };
+      if (status === "completed" && ok) {
+        return { id: rowId, icon: "命", text: command, tone: "success", spinning: false };
       }
       if (status === "completed" || status === "failed") {
-        return { id: itemId, icon: "✗", text: command, color: "text-danger", spinning: false };
+        return { id: rowId, icon: "命", text: command, tone: "danger", spinning: false };
       }
-      // in_progress
-      return { id: itemId, icon: "🔄", text: command, color: "text-accent-light", spinning: true };
+
+      return { id: rowId, icon: "命", text: command, tone: "accent", spinning: true };
     }
 
     case "agent_message": {
       const text = String(item.text ?? "");
-      // Only show completed/updated — started has no content yet
       if (phase === "started") {
-        return { id: itemId, icon: "💬", text: "Generating…", color: "text-accent-light", spinning: true };
+        return {
+          id: rowId,
+          icon: "答",
+          text: "正在生成回复内容",
+          tone: "accent",
+          spinning: true,
+        };
       }
-      return { id: itemId, icon: "💬", text, color: "text-text-primary", spinning: false };
+      return { id: rowId, icon: "答", text, tone: "neutral", spinning: false };
     }
 
-    case "reasoning": {
-      const text = String(item.text ?? "").slice(0, 200);
-      return { id: itemId, icon: "🧠", text, color: "text-text-secondary", spinning };
-    }
+    case "reasoning":
+      return {
+        id: rowId,
+        icon: "思",
+        text: String(item.text ?? "").slice(0, 220),
+        tone: "neutral",
+        spinning,
+      };
 
     case "file_change": {
       const changes = item.changes as Array<{ path: string; kind: string }> | undefined;
-      const paths = changes?.map((c) => {
-        const kindIcon = c.kind === "add" ? "+" : c.kind === "delete" ? "🗑" : "✎";
-        return `${kindIcon} ${c.path}`;
-      }).join("  ") ?? "";
-      const suffix = status === "failed" ? " (failed)" : "";
+      const summary = changes?.map((change) => {
+        const prefix = change.kind === "add" ? "+" : change.kind === "delete" ? "-" : "~";
+        return `${prefix} ${change.path}`;
+      }).join(" / ") ?? "文件变更";
       return {
-        id: itemId,
-        icon: "📝",
-        text: `${paths}${suffix}`,
-        color: status === "failed" ? "text-danger" : "text-text-primary",
+        id: rowId,
+        icon: "改",
+        text: summary,
+        tone: status === "failed" ? "danger" : "neutral",
         spinning: status === "in_progress",
       };
     }
@@ -198,64 +328,60 @@ function renderItemRow(
     case "mcp_tool_call": {
       const server = String(item.server ?? "");
       const tool = String(item.tool ?? "");
-      const resultStr = item.result ? " ✓" : "";
-      const err = item.error ? ` ❌ ${String(item.error)}` : "";
+      const suffix = item.error ? `：${String(item.error)}` : item.result ? "：已返回结果" : "";
       return {
-        id: itemId,
-        icon: "🔌",
-        text: `${server}:${tool}${resultStr}${err}`.slice(0, 120),
-        color: item.error ? "text-danger" : "text-accent-light",
+        id: rowId,
+        icon: "具",
+        text: `${server}:${tool}${suffix}`.slice(0, 140),
+        tone: item.error ? "danger" : "accent",
         spinning: status === "in_progress",
       };
     }
 
-    case "web_search": {
-      const query = String(item.query ?? "");
+    case "web_search":
       return {
-        id: itemId,
-        icon: "🔍",
-        text: query.slice(0, 100),
-        color: "text-text-secondary",
+        id: rowId,
+        icon: "搜",
+        text: String(item.query ?? "").slice(0, 120),
+        tone: "warning",
         spinning: false,
       };
-    }
 
     case "todo_list": {
-      const items = item.items as Array<{ text: string; completed: boolean }> | undefined;
-      const list = items?.map((t) => `${t.completed ? "☑" : "☐"} ${t.text}`).join("  ") ?? "";
+      const todos = item.items as Array<{ text: string; completed: boolean }> | undefined;
+      const list = todos?.map((todo) => `${todo.completed ? "[x]" : "[ ]"} ${todo.text}`).join(" / ") ?? "待办同步";
       return {
-        id: itemId,
-        icon: "📋",
-        text: list.slice(0, 150),
-        color: "text-text-secondary",
+        id: rowId,
+        icon: "办",
+        text: list.slice(0, 160),
+        tone: "warning",
         spinning: false,
       };
     }
 
-    case "error": {
+    case "error":
       return {
-        id: itemId,
-        icon: "⚠️",
-        text: String(item.message ?? "Unknown item error").slice(0, 120),
-        color: "text-danger",
+        id: rowId,
+        icon: "错",
+        text: String(item.message ?? "未知步骤错误").slice(0, 140),
+        tone: "danger",
         spinning: false,
       };
-    }
 
     default:
       return null;
   }
 }
 
-/* ------------------------------------------------------------------ */
-/*  Page component                                                     */
-/* ------------------------------------------------------------------ */
-
 export function SessionPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
+  const location = useLocation();
   const navigate = useNavigate();
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const streamListRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const socketRef = useRef<ReturnType<typeof createSessionSocket> | null>(null);
+  const messageRefs = useRef<Record<string, HTMLElement | null>>({});
+  const highlightTimerRef = useRef<number | null>(null);
 
   const [session, setSession] = useState<SessionDetail | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -277,107 +403,147 @@ export function SessionPage() {
   const [todoCreating, setTodoCreating] = useState(false);
   const [todoError, setTodoError] = useState<string | null>(null);
 
-  // Live stream events for the current processing round
   const [streamEvents, setStreamEvents] = useState<CodexStreamEvent[]>([]);
-  const [streamCollapsed, setStreamCollapsed] = useState(false);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
 
-  const token = localStorage.getItem("token");
-  const socketRef = useRef<ReturnType<typeof createSessionSocket> | null>(null);
+  const token = getStoredAuthToken();
+  const locationState = location.state as PageLocationState | null;
+  const displayMessages = replayMode ? replayMessages : messages;
+  const projectLink = session?.project_id ? `/projects/${session.project_id}` : "/dashboard";
+  const sessionBackTo = locationState?.backTo ?? {
+    label: "返回会话列表",
+    href: projectLink,
+  };
+  const codexThreadId = resolveDisplayedCodexThreadId(session);
+  const renderedEvents = streamEvents
+    .map(renderStreamEvent)
+    .filter((event): event is RenderedEvent => event !== null);
+  const pendingTodos = todos.filter((todo) => todo.status === "pending");
+  const doneTodos = todos.filter((todo) => todo.status === "completed");
+  const sortedTodos = [...pendingTodos, ...doneTodos];
+  const hasBusyStream = sending || renderedEvents.some((event) => event.spinning);
+  const previewTodos = sortedTodos.slice(0, 4);
+  const hiddenTodoCount = Math.max(sortedTodos.length - previewTodos.length, 0);
+  const visibleEvents = renderedEvents.slice(-10);
+  const hiddenEventCount = Math.max(renderedEvents.length - visibleEvents.length, 0);
+  const showLiveStream = !replayMode && (sending || renderedEvents.length > 0);
 
   useEffect(() => {
-    if (!token) { navigate("/login"); return; }
-    if (!sessionId) { navigate("/dashboard"); return; }
-    loadSession();
-    loadMessages();
-    loadTodos();
+    if (!token && !hasStoredAuthSession()) {
+      navigate("/login");
+      return;
+    }
+    if (!sessionId) {
+      navigate("/dashboard");
+      return;
+    }
+
+    void loadSession();
+    void loadMessages();
+    void loadTodos();
   }, [sessionId, token, navigate]);
 
   useEffect(() => {
-    if (!token || !sessionId) return;
+    if (!sessionId || !hasStoredAuthSession()) {
+      return;
+    }
+
     const socket = createSessionSocket(
-      token,
       {
-        onMessage(msg: Message) {
-          setMessages((prev) => {
-            if (prev.some((m) => m.id === msg.id)) return prev;
-            return [...prev, msg];
+        onMessage(message: Message) {
+          setMessages((previous) => {
+            if (previous.some((item) => item.id === message.id)) {
+              return previous;
+            }
+            return [...previous, message];
           });
-          // Agent message arrived → clear stream events
-          if (msg.sender === "agent" || msg.sender !== "user") {
+
+          if (isAgentSender(message.sender)) {
             setStreamEvents([]);
           }
         },
         onStatusChanged(status: string) {
-          setSession((prev) => (prev ? { ...prev, runtime_status: status } : prev));
+          setSession((previous) => (previous ? { ...previous, runtime_status: status } : previous));
         },
-        onStreamEvent(ev: CodexStreamEvent) {
+        onStreamEvent(event: CodexStreamEvent) {
           if (
-            ev.type === "thread.started" &&
-            ev.data &&
-            typeof ev.data === "object" &&
-            "thread_id" in ev.data
+            event.type === "thread.started"
+            && event.data
+            && typeof event.data === "object"
+            && "thread_id" in event.data
           ) {
-            const threadId = String(ev.data.thread_id);
-            setSession((prev) =>
-              prev
-                ? { ...prev, bound_agent_session_ref: threadId }
-                : prev,
-            );
+            const threadId = String(event.data.thread_id);
+            setSession((previous) => (
+              previous ? { ...previous, bound_agent_session_ref: threadId } : previous
+            ));
           }
 
-          setStreamEvents((prev) => {
-            // For agent_message items, replace previous partial updates for the same item
-            if (
-              ev.type === "item.updated" ||
-              ev.type === "item.completed"
-            ) {
-              const evData = ev.data as Record<string, unknown>;
-              const item = evData?.item as Record<string, unknown> | undefined;
+          setStreamEvents((previous) => {
+            if (event.type === "item.updated" || event.type === "item.completed") {
+              const eventData = event.data as Record<string, unknown>;
+              const item = eventData.item as Record<string, unknown> | undefined;
               if (item?.type === "agent_message") {
                 const itemId = item.id;
-                const filtered = prev.filter((p) => {
-                  const pd = p.data as Record<string, unknown>;
-                  const pi = pd?.item as Record<string, unknown> | undefined;
-                  // Keep non-agent_message items and the same item id
-                  if (pi?.type !== "agent_message") return true;
-                  return pi?.id === itemId;
+                const filtered = previous.filter((existing) => {
+                  const existingData = existing.data as Record<string, unknown>;
+                  const existingItem = existingData.item as Record<string, unknown> | undefined;
+                  if (existingItem?.type !== "agent_message") {
+                    return true;
+                  }
+                  return existingItem?.id === itemId;
                 });
-                return [...filtered, ev];
+                return [...filtered, event];
               }
             }
-            return [...prev, ev];
+
+            return [...previous, event];
           });
         },
       },
-      sessionId, // auto-subscribe as soon as the socket opens
+      sessionId,
     );
+
     socketRef.current = socket;
+
     return () => {
       socket.close();
       socketRef.current = null;
     };
-  }, [token, sessionId]);
+  }, [sessionId]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, replayMessages, streamEvents]);
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [displayMessages, renderedEvents]);
 
-  // Auto-scroll stream card to bottom when new events arrive
   useEffect(() => {
-    if (streamListRef.current) {
-      streamListRef.current.scrollTop = streamListRef.current.scrollHeight;
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      return;
     }
-  }, [streamEvents]);
+
+    textarea.style.height = "0px";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
+  }, [content]);
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current) {
+        window.clearTimeout(highlightTimerRef.current);
+      }
+    };
+  }, []);
 
   const loadSession = async () => {
     try {
-      const res = await getSessionDetail(token!, sessionId!);
-      setSession(res.data);
+      const response = await getSessionDetail(token!, sessionId!);
+      setSession(response.data);
     } catch (err: any) {
       if (err.message === "UNAUTHORIZED" || err.message.includes("401")) {
-        localStorage.removeItem("token"); navigate("/login"); return;
+        clearAuthSession();
+        navigate("/login");
+        return;
       }
-      setError(err.message || "Failed to load session");
+      setError(err.message || "加载会话失败");
     }
   };
 
@@ -385,13 +551,15 @@ export function SessionPage() {
     try {
       setLoading(true);
       setError(null);
-      const res = await getMessages(token!, sessionId!);
-      setMessages(res.data);
+      const response = await getMessages(token!, sessionId!);
+      setMessages(response.data);
     } catch (err: any) {
       if (err.message === "UNAUTHORIZED" || err.message.includes("401")) {
-        localStorage.removeItem("token"); navigate("/login"); return;
+        clearAuthSession();
+        navigate("/login");
+        return;
       }
-      setError(err.message || "Failed to load messages");
+      setError(err.message || "加载消息失败");
     } finally {
       setLoading(false);
     }
@@ -400,31 +568,44 @@ export function SessionPage() {
   const loadTodos = async () => {
     try {
       setTodosLoading(true);
-      const res = await getTodos(token!, sessionId!);
-      setTodos(res.data);
+      const response = await getTodos(token!, sessionId!);
+      setTodos(response.data);
     } catch {
-      // silently ignore
+      // ignore todo loading issues so the main conversation stays usable
     } finally {
       setTodosLoading(false);
     }
   };
 
-  const handleSend = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSend = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
     const trimmed = content.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+      return;
+    }
+
     try {
       setSending(true);
       setSendError(null);
-      // Clear previous stream events for the new round
       setStreamEvents([]);
-      const res = await sendMessage(token!, sessionId!, trimmed);
-      setMessages((prev) => prev.some((m) => m.id === res.data.message.id) ? prev : [...prev, res.data.message]);
+      const response = await sendMessage(token!, sessionId!, trimmed);
+      setMessages((previous) => (
+        previous.some((message) => message.id === response.data.message.id)
+          ? previous
+          : [...previous, response.data.message]
+      ));
       setContent("");
     } catch (err: any) {
-      setSendError(err.message || "Failed to send message");
+      setSendError(err.message || "发送消息失败");
     } finally {
       setSending(false);
+    }
+  };
+
+  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
     }
   };
 
@@ -434,16 +615,17 @@ export function SessionPage() {
       setReplayMessages([]);
       return;
     }
+
     try {
       setReplayLoading(true);
-      const res = await getReplay(token!, sessionId!);
-      const sorted = [...res.data].sort(
-        (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
-      );
-      setReplayMessages(sorted);
+      const response = await getReplay(token!, sessionId!);
+      const mappedMessages = response.data
+        .map(mapReplayEntryToMessage)
+        .sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime());
+      setReplayMessages(mappedMessages);
       setReplayMode(true);
     } catch (err: any) {
-      setError(err.message || "Failed to load replay");
+      setError(err.message || "加载回放失败");
     } finally {
       setReplayLoading(false);
     }
@@ -453,6 +635,7 @@ export function SessionPage() {
     setNewTodoMessageId(messageId);
     setNewTodoTitle("");
     setTodoError(null);
+    focusMessage(messageId);
   };
 
   const handleCancelTodo = () => {
@@ -463,47 +646,63 @@ export function SessionPage() {
 
   const handleCreateTodo = async (messageId: string) => {
     const trimmed = newTodoTitle.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+      return;
+    }
+
     try {
       setTodoCreating(true);
       setTodoError(null);
-      const res = await createTodo(token!, sessionId!, messageId, trimmed);
-      setTodos((prev) => [...prev, res.data]);
+      const response = await createTodo(token!, sessionId!, messageId, trimmed);
+      setTodos((previous) => [...previous, response.data]);
       setNewTodoMessageId(null);
       setNewTodoTitle("");
     } catch (err: any) {
-      setTodoError(err.message || "Failed to create todo");
+      setTodoError(err.message || "创建待办失败");
     } finally {
       setTodoCreating(false);
     }
   };
 
   const handleToggleTodoStatus = async (todo: Todo) => {
-    const nextStatus: TodoStatus = todo.status === "done" ? "pending" : "done";
+    if (replayMode) {
+      return;
+    }
+
+    const nextStatus: TodoStatus = todo.status === "completed" ? "pending" : "completed";
     try {
-      const res = await updateTodoStatus(token!, todo.id, nextStatus);
-      setTodos((prev) => prev.map((t) => (t.id === todo.id ? res.data : t)));
+      const response = await updateTodoStatus(token!, todo.id, nextStatus);
+      setTodos((previous) => previous.map((item) => (item.id === todo.id ? response.data : item)));
     } catch {
-      // silently ignore
+      // ignore transient todo update issues
     }
   };
 
-  const displayMessages = replayMode ? replayMessages : messages;
-  const projectLink = session?.project_id ? `/projects/${session.project_id}` : "/dashboard";
-  const codexThreadId = resolveDisplayedCodexThreadId(session);
+  const focusMessage = (messageId: string) => {
+    const target = messageRefs.current[messageId];
+    target?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setHighlightedMessageId(messageId);
+    if (highlightTimerRef.current) {
+      window.clearTimeout(highlightTimerRef.current);
+    }
+    highlightTimerRef.current = window.setTimeout(() => {
+      setHighlightedMessageId(null);
+    }, 1800);
+  };
 
-  // Render stream events into UI rows
-  const renderedEvents = streamEvents
-    .map(renderStreamEvent)
-    .filter((r): r is RenderedEvent => r !== null);
-
-  if (loading && !session) return <PageLoading label="Loading session..." />;
+  if (loading && !session) {
+    return <PageLoading label="加载会话中..." />;
+  }
 
   if (error && !session) {
     return (
-      <PageShell title="Error" backTo={{ label: "返回 Dashboard", href: "/dashboard" }}>
-        <GlassCard>
-          <p className="text-danger">{error}</p>
+      <PageShell
+        title="错误"
+        backTo={sessionBackTo}
+        className="session-page-shell pt-4 sm:pt-6"
+      >
+        <GlassCard className="session-surface-card">
+          <p className="session-inline-error">{error}</p>
         </GlassCard>
       </PageShell>
     );
@@ -511,244 +710,291 @@ export function SessionPage() {
 
   return (
     <PageShell
-      backTo={{ label: "返回项目", href: projectLink }}
+      backTo={sessionBackTo}
       fullHeight
+      className="session-page-shell pt-4 sm:pt-5"
     >
-      {/* Header */}
-      <div className="flex items-start justify-between flex-wrap gap-3 mb-4 shrink-0">
-        <div className="min-w-0">
-          <div className="flex items-center gap-3 min-w-0">
-            <h1 className="text-xl font-bold text-text-primary truncate">
-              {session?.title ?? "Session"}
-            </h1>
-            {session?.runtime_status && (
-              <Badge variant="accent">{session.runtime_status}</Badge>
-            )}
-            {replayMode && (
-              <Badge variant="warning">REPLAY</Badge>
-            )}
-          </div>
-          <div className="mt-2 flex flex-col gap-1 text-xs">
-            <div className="flex flex-wrap items-center gap-2 text-text-muted">
-              <span className="uppercase tracking-[0.18em] text-[10px] text-text-muted/80">
-                Codex Thread
-              </span>
-              {codexThreadId ? (
-                <code className="rounded-md bg-surface-3 px-2 py-1 text-[11px] text-accent-light break-all">
-                  {codexThreadId}
-                </code>
-              ) : (
-                <span>尚未生成，首次真实消息成功后显示</span>
+      <div className="session-page">
+        <GlassCard className="session-topbar" as="section">
+          <div className="session-topbar__main">
+            <div className="session-topbar__title-row">
+              <h1 className="session-topbar__title">{session?.title ?? "会话"}</h1>
+              {session?.runtime_status && (
+                <Badge variant="accent">{formatRuntimeStatus(session.runtime_status)}</Badge>
               )}
+              <Badge variant={session?.visibility === "private" ? "warning" : "success"}>
+                {session?.visibility === "private" ? "私有" : "共享"}
+              </Badge>
+              {replayMode && <Badge variant="warning">回放模式</Badge>}
+            </div>
+            <div className="session-topbar__meta">
+              <span className="session-topbar__meta-item">
+                线程 ID
+                <code>{codexThreadId ?? "等待首次同步"}</code>
+              </span>
+              <span className="session-topbar__meta-item">
+                更新时间
+                <strong>{session ? formatDateTime(session.updated_at) : "-"}</strong>
+              </span>
             </div>
           </div>
-        </div>
-        <Button
-          variant={replayMode ? "secondary" : "ghost"}
-          size="sm"
-          onClick={handleToggleReplay}
-          loading={replayLoading}
-        >
-          {replayMode ? "退出回放" : "Replay"}
-        </Button>
-      </div>
+          <div className="session-topbar__actions">
+            <button
+              type="button"
+              className="session-button session-button--secondary"
+              onClick={handleToggleReplay}
+              disabled={replayLoading}
+            >
+              {replayLoading ? "加载中..." : replayMode ? "退出回放" : "查看回放"}
+            </button>
+          </div>
+        </GlassCard>
 
-      {/* Messages Area */}
-      <GlassCard className="flex-1 min-h-0 flex flex-col mb-4 overflow-hidden">
-        <div className="flex-1 overflow-y-auto -mx-6 -mt-6 px-6 pt-6 pb-2">
-          {displayMessages.length === 0 && renderedEvents.length === 0 ? (
-            <p className="text-sm text-text-muted text-center py-12">还没有消息，开始对话吧！</p>
-          ) : (
-            <div className="flex flex-col gap-1">
-              {displayMessages.map((msg) => {
-                const isUser = msg.sender === "user" || msg.sender !== "ai";
-                return (
-                  <div
-                    key={msg.id}
-                    className={`flex ${isUser ? "justify-end" : "justify-start"} animate-fade-in`}
-                  >
-                    <div
-                      className={`max-w-[80%] px-4 py-3 rounded-2xl ${
-                        isUser
-                          ? "bg-accent-muted border border-accent/20 rounded-br-md"
-                          : "bg-surface-2 border border-glass-border rounded-bl-md"
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-2 mb-1">
-                        <span className={`text-xs font-medium ${isUser ? "text-accent-light" : "text-text-muted"}`}>
-                          {msg.sender}
-                        </span>
-                        <span className="text-[10px] text-text-muted">
-                          {new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                        </span>
-                      </div>
-                      <p className="text-sm text-text-primary whitespace-pre-wrap break-words leading-relaxed">
-                        {msg.content}
-                      </p>
+        <div className="session-layout">
+          <GlassCard className="session-conversation-panel" as="section">
+            <div className="session-panel-header">
+              <h2 className="session-section-header__title">消息区</h2>
+              <div className="session-chip-row">
+                <span className={`session-chip ${hasBusyStream ? "session-chip--active" : ""}`}>
+                  {hasBusyStream ? "助手处理中" : "空闲中"}
+                </span>
+              </div>
+            </div>
 
-                      {/* Todo button */}
-                      {!replayMode && (
-                        <div className="flex gap-2 mt-2">
-                          <button
-                            className="text-xs text-text-muted hover:text-accent-light transition-colors flex items-center gap-1"
-                            onClick={() => handleNewTodoClick(msg.id)}
-                          >
-                            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-                              <path d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z" />
-                            </svg>
-                            Todo
-                          </button>
-                        </div>
-                      )}
+            {replayMode && (
+              <div className="session-banner session-banner--warning">
+                当前是回放模式：输入、待办更新和实时处理都会保持只读。
+              </div>
+            )}
+            {error && session && (
+              <div className="session-banner session-banner--danger">{error}</div>
+            )}
 
-                      {/* Inline todo form */}
-                      {newTodoMessageId === msg.id && (
-                        <div className="mt-2 p-3 rounded-lg bg-surface-3 border border-glass-border animate-fade-in">
-                          {todoError && (
-                            <p className="text-xs text-danger mb-2">{todoError}</p>
-                          )}
-                          <div className="flex gap-2">
-                            <Input
-                              value={newTodoTitle}
-                              onChange={(e) => setNewTodoTitle(e.target.value)}
-                              placeholder="Todo 标题..."
-                              className="!text-xs !py-1.5"
-                              disabled={todoCreating}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") handleCreateTodo(msg.id);
-                              }}
-                            />
-                            <Button size="sm" onClick={() => handleCreateTodo(msg.id)} loading={todoCreating} disabled={!newTodoTitle.trim()}>
-                              添加
-                            </Button>
-                            <Button variant="ghost" size="sm" onClick={handleCancelTodo} disabled={todoCreating}>
-                              取消
-                            </Button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+            <div className="session-feed-scroll">
+              {displayMessages.length === 0 && !showLiveStream ? (
+                <div className="session-empty-state">
+                  <div className="session-empty-state__icon">聊</div>
+                  <h3>还没有消息</h3>
+                  <p>先发出第一条协作指令，助手的实时处理会直接在这里展开。</p>
+                </div>
+              ) : (
+                <div className="session-message-list">
+                  {displayMessages.map((message) => {
+                    const presenter = getMessagePresenter(message);
+                    const isHighlighted = highlightedMessageId === message.id;
 
-              {/* ── Stream Event Status Card ── */}
-              {!replayMode && renderedEvents.length > 0 && (
-                <div className="flex justify-start animate-fade-in">
-                  <div className="max-w-[85%] min-w-[60%] bg-surface-2/80 border border-glass-border rounded-2xl rounded-bl-md overflow-hidden">
-                    {/* Card header */}
-                    <div className="flex items-center justify-between px-4 py-2 border-b border-glass-border bg-surface-3/50">
-                      <div className="flex items-center gap-2">
-                        <span className="inline-block w-2 h-2 rounded-full bg-accent animate-pulse" />
-                        <span className="text-xs font-medium text-accent-light">
-                          实时处理中…
-                        </span>
-                      </div>
-                      <button
-                        className="text-xs text-text-muted hover:text-text-primary transition-colors"
-                        onClick={() => setStreamCollapsed((v) => !v)}
+                    return (
+                      <article
+                        key={message.id}
+                        ref={(node) => {
+                          messageRefs.current[message.id] = node;
+                        }}
+                        className={[
+                          "session-message-row",
+                          presenter.tone === "agent" ? "session-message-row--agent" : "session-message-row--human",
+                          isHighlighted ? "session-message-row--highlight" : "",
+                        ].join(" ").trim()}
                       >
-                        {streamCollapsed ? "展开" : "收起"}
+                        <div className={`session-message-avatar session-message-avatar--${presenter.tone}`}>
+                          {presenter.avatarText}
+                        </div>
+                        <div className={`session-message-card session-message-card--${presenter.tone}`}>
+                          <div className="session-message-card__top">
+                            <div>
+                              <div className="session-message-card__author">{presenter.label}</div>
+                            </div>
+                            <time className="session-message-card__time" dateTime={message.created_at}>
+                              {formatClock(message.created_at)}
+                            </time>
+                          </div>
+
+                          <div className="session-message-card__body">{message.content}</div>
+
+                          {!replayMode && (
+                            <div className="session-message-card__footer">
+                              <button
+                                type="button"
+                                className="session-inline-link"
+                                onClick={() => handleNewTodoClick(message.id)}
+                              >
+                                从这条消息创建待办
+                              </button>
+                            </div>
+                          )}
+
+                          {newTodoMessageId === message.id && !replayMode && (
+                            <div className="session-inline-form">
+                              <div className="session-inline-form__header">新建待办</div>
+                              {todoError && <div className="session-inline-error">{todoError}</div>}
+                              <div className="session-inline-form__row">
+                                <input
+                                  value={newTodoTitle}
+                                  onChange={(event) => setNewTodoTitle(event.target.value)}
+                                  placeholder="例如：整理这条消息对应的执行步骤"
+                                  className="session-text-input"
+                                  disabled={todoCreating}
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter") {
+                                      event.preventDefault();
+                                      void handleCreateTodo(message.id);
+                                    }
+                                  }}
+                                />
+                                <button
+                                  type="button"
+                                  className="session-button session-button--primary"
+                                  onClick={() => void handleCreateTodo(message.id)}
+                                  disabled={todoCreating || !newTodoTitle.trim()}
+                                >
+                                  {todoCreating ? "添加中..." : "添加"}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="session-button session-button--ghost"
+                                  onClick={handleCancelTodo}
+                                  disabled={todoCreating}
+                                >
+                                  取消
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </article>
+                    );
+                  })}
+
+                  {showLiveStream && (
+                    <article className="session-message-row session-message-row--agent session-message-row--live">
+                      <div className="session-message-avatar session-message-avatar--agent">流</div>
+                      <div className="session-message-card session-message-card--agent session-live-card">
+                        <div className="session-live-card__header">
+                          <div>
+                            <div className="session-message-card__author">协作助手</div>
+                            <div className="session-message-card__meta">
+                              {hasBusyStream ? "正在处理这一轮消息" : "等待最终回复入列"}
+                            </div>
+                          </div>
+                          <span className={`session-live-card__badge ${hasBusyStream ? "session-live-card__badge--active" : ""}`}>
+                            {hasBusyStream ? "实时处理中" : "即将完成"}
+                          </span>
+                        </div>
+
+                        {hiddenEventCount > 0 && (
+                          <div className="session-live-card__summary">
+                            已折叠较早的 {hiddenEventCount} 条处理记录
+                          </div>
+                        )}
+
+                        {visibleEvents.length === 0 ? (
+                          <div className="session-live-card__empty">
+                            <span className="session-live-card__pulse" />
+                            <span>等待实时事件...</span>
+                          </div>
+                        ) : (
+                          <div className="session-live-list">
+                            {visibleEvents.map((event) => (
+                              <div key={event.id} className={`session-stream-item session-stream-item--${event.tone}`}>
+                                <span className={`session-stream-item__icon ${event.spinning ? "session-stream-item__icon--spinning" : ""}`}>
+                                  {event.icon}
+                                </span>
+                                <span className="session-stream-item__text">{event.text}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </article>
+                  )}
+
+                  <div ref={messagesEndRef} />
+                </div>
+              )}
+            </div>
+
+            {!replayMode && (
+              <form className="session-composer" onSubmit={handleSend}>
+                {sendError && <div className="session-banner session-banner--danger">{sendError}</div>}
+
+                <div className="session-composer__row">
+                  <textarea
+                    ref={textareaRef}
+                    value={content}
+                    onChange={(event) => setContent(event.target.value)}
+                    onKeyDown={handleComposerKeyDown}
+                    placeholder="输入消息...（Enter 发送，Shift+Enter 换行）"
+                    className="session-composer__input"
+                    disabled={sending}
+                    rows={1}
+                  />
+                  <button
+                    type="submit"
+                    className="session-button session-button--primary session-composer__submit"
+                    disabled={sending || !content.trim()}
+                  >
+                    {sending ? "发送中..." : "发送"}
+                  </button>
+                </div>
+              </form>
+            )}
+          </GlassCard>
+
+          <aside className="session-rail">
+            <GlassCard className="session-rail-card" as="section">
+              <div className="session-section-header session-section-header--compact">
+                <div>
+                  <h2 className="session-section-header__title">待办</h2>
+                </div>
+                <span className="session-chip">未完成 {pendingTodos.length}</span>
+              </div>
+
+              {todosLoading ? (
+                <div className="session-empty-card session-empty-card--compact">
+                  <div className="session-empty-card__icon">办</div>
+                  <p>待办加载中...</p>
+                </div>
+              ) : previewTodos.length === 0 ? (
+                <div className="session-empty-card session-empty-card--compact">
+                  <div className="session-empty-card__icon">办</div>
+                  <p>还没有待办，可在消息下方快速创建。</p>
+                </div>
+              ) : (
+                <div className="session-todo-preview-list">
+                  {previewTodos.map((todo) => (
+                    <div key={todo.id} className={`session-todo-card ${todo.status === "completed" ? "session-todo-card--done" : ""}`}>
+                      <div className="session-todo-card__top">
+                        <span className={`session-status-pill ${todo.status === "completed" ? "session-status-pill--done" : "session-status-pill--pending"}`}>
+                          {todo.status === "completed" ? "已完成" : "待处理"}
+                        </span>
+                        <button
+                          type="button"
+                          className="session-inline-link"
+                          onClick={() => focusMessage(todo.source_message_id)}
+                        >
+                          定位消息
+                        </button>
+                      </div>
+                      <div className="session-todo-card__title">{todo.title}</div>
+                      <div className="session-todo-card__meta">创建于 {formatDateTime(todo.created_at)}</div>
+                      <button
+                        type="button"
+                        className={`session-button ${todo.status === "pending" ? "session-button--primary" : "session-button--secondary"}`}
+                        onClick={() => void handleToggleTodoStatus(todo)}
+                        disabled={replayMode}
+                      >
+                        {todo.status === "pending" ? "标记完成" : "重新打开"}
                       </button>
                     </div>
-
-                    {/* Card body */}
-                    {!streamCollapsed && (
-                      <div
-                        ref={streamListRef}
-                        className="px-4 py-2 max-h-[280px] overflow-y-auto flex flex-col gap-1"
-                      >
-                        {renderedEvents.map((re) => (
-                          <div key={re.id} className="flex items-start gap-2 py-0.5">
-                            <span
-                              className={`shrink-0 text-sm leading-5 ${re.spinning ? "animate-spin inline-block" : ""}`}
-                              style={re.spinning ? { animationDuration: "2s" } : undefined}
-                            >
-                              {re.icon}
-                            </span>
-                            <span className={`text-xs leading-5 break-all ${re.color}`}>
-                              {re.text}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+                  ))}
+                  {hiddenTodoCount > 0 && (
+                    <div className="session-rail-note">还有 {hiddenTodoCount} 项待办未展示，消息区仍可继续创建与定位。</div>
+                  )}
                 </div>
               )}
-
-              <div ref={messagesEndRef} />
-            </div>
-          )}
+            </GlassCard>
+          </aside>
         </div>
-      </GlassCard>
-
-      {/* Todo List */}
-      {!replayMode && todos.length > 0 && (
-        <GlassCard className="shrink-0 mb-4 !p-4 max-h-[180px] overflow-y-auto">
-          <h3 className="text-sm font-semibold text-text-primary mb-2 flex items-center gap-2">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" className="text-accent">
-              <path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0Z" />
-            </svg>
-            待办 ({todos.filter((t) => t.status === "pending").length} 项未完成)
-          </h3>
-          <div className="flex flex-col gap-1.5">
-            {todos.map((todo) => (
-              <div key={todo.id} className="flex items-center justify-between gap-2 py-1.5 border-b border-glass-border last:border-0">
-                <div className="flex items-center gap-2 min-w-0 flex-1">
-                  <Badge variant={todo.status === "done" ? "success" : "warning"}>
-                    {todo.status === "done" ? "完成" : "待办"}
-                  </Badge>
-                  <span
-                    className={`text-sm truncate ${todo.status === "done" ? "line-through text-text-muted" : "text-text-primary"}`}
-                  >
-                    {todo.title}
-                  </span>
-                </div>
-                <Button
-                  variant={todo.status === "pending" ? "primary" : "secondary"}
-                  size="sm"
-                  onClick={() => handleToggleTodoStatus(todo)}
-                  className="!text-xs !py-1 !px-2 shrink-0"
-                >
-                  {todo.status === "pending" ? "完成" : "重开"}
-                </Button>
-              </div>
-            ))}
-          </div>
-        </GlassCard>
-      )}
-
-      {/* Message Input */}
-      {!replayMode && (
-        <GlassCard className="shrink-0 !p-3 sm:!p-4 w-full">
-          <form onSubmit={handleSend} className="w-full">
-            {sendError && (
-              <div className="px-3 py-2 rounded-md bg-danger-muted border border-danger/30 text-sm text-danger mb-3">
-                {sendError}
-              </div>
-            )}
-            <div className="flex gap-2 w-full">
-              <Input
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
-                placeholder="输入消息..."
-                className="flex-1 min-w-0"
-                disabled={sending}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSend(e);
-                  }
-                }}
-              />
-              <Button type="submit" loading={sending} disabled={!content.trim()}>
-                发送
-              </Button>
-            </div>
-          </form>
-        </GlassCard>
-      )}
+      </div>
     </PageShell>
   );
 }

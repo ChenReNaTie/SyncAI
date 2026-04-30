@@ -26,6 +26,7 @@ export async function buildApp() {
     logger: app.log,
     ...(env.codexPath ? { codexPath: env.codexPath } : {}),
     mockLatencyMs: env.mockAgentLatencyMs,
+    useMockAdapter: env.nodeEnv === "test",
   });
 
   app.decorate("config", {
