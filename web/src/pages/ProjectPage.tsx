@@ -3,9 +3,11 @@ import { useParams, useNavigate, useLocation, Link } from "react-router-dom";
 import {
   clearAuthSession,
   createSession,
+  getProject,
   getSessions,
   getStoredAuthToken,
   hasStoredAuthSession,
+  type Project,
 } from "../api/client.js";
 import { PageShell, GlassCard, Button, Input, Badge, PageLoading } from "../components/index.js";
 
@@ -35,6 +37,7 @@ export function ProjectPage() {
   const navigate = useNavigate();
   const location = useLocation();
 
+  const [project, setProject] = useState<Project | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -56,18 +59,22 @@ export function ProjectPage() {
   useEffect(() => {
     if (!token && !hasStoredAuthSession()) { navigate("/login"); return; }
     if (!projectId) { navigate("/dashboard"); return; }
-    loadSessions();
+    loadProjectPage();
   }, [projectId, token, navigate, visibilityFilter]);
 
-  const loadSessions = async () => {
+  const loadProjectPage = async () => {
     try {
       setLoading(true);
       setError(null);
       const params = visibilityFilter
         ? { visibility: visibilityFilter as "shared" | "private" }
         : undefined;
-      const res = await getSessions(token!, projectId!, params);
-      setSessions(res.data);
+      const [projectRes, sessionsRes] = await Promise.all([
+        getProject(token!, projectId!),
+        getSessions(token!, projectId!, params),
+      ]);
+      setProject(projectRes.data);
+      setSessions(sessionsRes.data);
     } catch (err: any) {
       if (err.message === "UNAUTHORIZED" || err.message.includes("401")) {
         clearAuthSession(); navigate("/login"); return;
@@ -117,9 +124,42 @@ export function ProjectPage() {
 
   return (
     <PageShell
-      title="会话列表"
+      title={project?.name ?? "项目"}
       backTo={projectBackTo}
     >
+      <GlassCard className="mb-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-2xl font-bold text-text-primary">
+              {project?.name ?? "项目"}
+            </h2>
+            {project?.description ? (
+              <p className="mt-2 text-sm text-text-secondary">
+                {project.description}
+              </p>
+            ) : (
+              <p className="mt-2 text-sm text-text-muted">
+                暂未填写项目描述
+              </p>
+            )}
+          </div>
+          {project && (
+            <Badge variant="default">
+              创建于 {new Date(project.created_at).toLocaleDateString()}
+            </Badge>
+          )}
+        </div>
+
+        <div className="mt-4 rounded-lg border border-glass-border bg-surface-2 px-4 py-3">
+          <p className="text-xs font-medium uppercase tracking-[0.18em] text-text-muted">
+            工作目录
+          </p>
+          <p className="mt-2 text-sm text-text-secondary break-all">
+            {project?.working_directory || "未配置工作目录"}
+          </p>
+        </div>
+      </GlassCard>
+
       <GlassCard>
         <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
           <div className="flex items-center gap-3">

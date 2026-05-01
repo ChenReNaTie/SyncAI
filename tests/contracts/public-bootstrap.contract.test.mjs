@@ -163,6 +163,7 @@ test("contract_public_bootstrap creates team, configures agent node, creates pro
         payload: {
           name: "shared-ai-chat",
           description: "Public bootstrap flow",
+          working_directory: "C:\\workspace\\shared-ai-chat",
         },
       });
 
@@ -174,6 +175,7 @@ test("contract_public_bootstrap creates team, configures agent node, creates pro
         created_by: registerPayload.data.user.id,
         name: "shared-ai-chat",
         description: "Public bootstrap flow",
+        working_directory: "C:\\workspace\\shared-ai-chat",
       });
 
       const listProjectsResponse = await app.inject({
@@ -190,6 +192,23 @@ test("contract_public_bootstrap creates team, configures agent node, creates pro
       assert.equal(listProjectsPayload.data.length, 1);
       assertProjectContract(listProjectsPayload.data[0], {
         id: createProjectPayload.data.id,
+        working_directory: "C:\\workspace\\shared-ai-chat",
+      });
+
+      const projectDetailResponse = await app.inject({
+        method: "GET",
+        url: `/api/v1/projects/${createProjectPayload.data.id}`,
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+        },
+      });
+
+      assert.equal(projectDetailResponse.statusCode, 200);
+      assertStrictKeys(projectDetailResponse.json(), ["data"]);
+      assertProjectContract(projectDetailResponse.json().data, {
+        id: createProjectPayload.data.id,
+        team_id: createTeamPayload.data.id,
+        working_directory: "C:\\workspace\\shared-ai-chat",
       });
 
       const createSessionResponse = await app.inject({

@@ -1,193 +1,235 @@
-# SyncAI / 灵悉AI - 面向小团队的 AI 编程协作与共享平台
+# SyncAI / 灵悉 AI
 
-## 📋 项目概述
+> 把原本只存在于个人终端里的 AI 编程过程，变成团队可共享、可协作、可沉淀的项目资产。
 
-### 产品名称
-- **英文**：SyncAI
-- **中文**：灵悉 AI
-- **Slogan**：心有灵悉，协同无间
+![Node.js >= 24](https://img.shields.io/badge/Node.js-%3E%3D24-43853D?logo=node.js&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=0B1220)
+![Fastify](https://img.shields.io/badge/Fastify-5.x-000000?logo=fastify&logoColor=white)
 
-### 产品定位
-> "把原本只存在于个人终端里的 AI 编程过程，转成团队可共享、可协作、可沉淀的项目资产"
+SyncAI 是一个面向小团队的 AI 编程协作与共享平台。它不试图重做 Codex 或 Claude Code，而是在现有 Agent 能力之上，补上团队协作层：共享会话、实时可见、过程沉淀、搜索回放，以及围绕会话上下文的轻量协作。
 
----
+如果你的团队已经在使用 Codex，但会话还停留在“每个人的本地终端里”，SyncAI 的目标就是把这些过程收拢到一个能持续协作的工作空间中。
 
-## 🎯 核心痛点
+## 为什么要做这个项目
 
-| 痛点 | 描述 | 影响 |
-|------|------|------|
-| **对话记录孤岛** | AI 会话只存在于本地，团队无法复用历史上下文 | 新人加入需要重新了解背景 |
-| **知识断层** | 之前的讨论和决策分散在个人设备中 | 团队协作效率低 |
-| **AI 状态不可见** | 不知道同事在和 AI 聊什么、AI 给出了什么建议 | 重复劳动，信息不对称 |
-| **协同跟进困难** | 多人推进同一个 AI 任务时缺乏统一入口 | 进度不透明，责任不清 |
+很多团队开始使用 AI 编程后，很快会遇到同一类问题：
 
----
+- AI 会话历史只保存在个人电脑里，团队无法复用上下文
+- 同一个任务被多人重复提问、重复试错、重复踩坑
+- 其他成员看不到 Agent 当前做到哪一步，也难以接着推进
+- 讨论、执行结果、行动项散落在终端、聊天工具和手工 todo 里，难以沉淀成项目资产
 
-## 💡 当前核心能力
+SyncAI 关注的不是“个人如何更快地使用 AI”，而是：
 
-### 1. 共享会话协作
-- ✅ 团队成员围绕同一个底层 Codex 会话持续追加消息
-- ✅ WebSocket 实时同步消息、状态与排队信息
-- ✅ 支持共享会话 / 私有会话，并允许双向切换
-- ✅ 项目维度组织会话历史，便于多人持续跟进
+- 团队如何围绕同一个 Agent 会话持续协作
+- 团队如何把 AI 执行过程沉淀为可搜索、可回放、可追踪的协作记录
+- 团队如何在不引入复杂流程系统的前提下，获得足够清晰的上下文共享与协作可见性
 
-### 2. 轻量协作跟进
-- ✅ 可从消息中手动提取轻量 todo
-- ✅ todo 保留来源消息，并可跳回上下文
-- ✅ 前端明确展示“运行中”与“排队中”
-- ✅ 不把 MVP 扩张成复杂任务管理系统
+## 产品优势
 
-### 3. 搜索与历史回放
-- ✅ 搜索只覆盖成员消息与 Agent 最终回复
-- ✅ 回放覆盖消息、状态变化与命令过程摘要
-- ✅ 共享转私有后保留审计信息
-- ✅ 支持团队后续复盘与二次协作
+### 1. 共享会话，而不是复制上下文
+- 团队成员围绕同一个底层 Agent 会话协作，而不是各自保留一个本地副本
+- 新成员可以直接接手已有会话，不需要从零重建上下文
+- 支持共享会话与私有会话，兼顾协作与必要的隔离
 
----
+### 2. 实时可见，减少“黑盒感”
+- 基于 WebSocket 实时同步消息、状态和排队信息
+- 前端明确展示运行中、排队中、完成、失败等状态
+- 可以看到会话正在处理什么，降低多人协作时的信息不对称
 
-## 👥 适用团队
+### 3. 过程可沉淀，不止拿结果
+- 搜索覆盖成员消息与 Agent 最终回复，方便后续复盘和复用
+- 回放覆盖消息、状态变化与命令过程摘要，让协作历史可追踪
+- 共享转私有后仍保留审计信息，适合团队内的知识沉淀
 
-- 2 到 20 人的小团队
-- 已在使用 Codex，或后续计划引入 Claude Code 的开发团队
-- 需要围绕同一个 Agent 会话持续协作，而不是各自保留本地上下文
-- 希望把消息、结果、todo、搜索与回放沉淀成项目资产
+### 4. 轻量协作，不强行变成任务系统
+- 支持从消息中手动提取 todo，并保留来源消息
+- 点击 todo 可以回到原始上下文，继续协作而不是跳出会话
+- 产品边界清晰，优先把“共享会话协作”这条主链路做好
 
----
+## 适合谁使用
 
-## 📋 开发进度
+SyncAI 目前更适合这类团队：
 
-### Phase 1：文档基线与架构收口 ✅ 已完成
-- [x] 产品需求、MVP 架构、Agent 接入、概要设计定稿
-- [x] 数据库、API、测试设计与开发拆解收口
-- [x] 文档体系已统一为中文正式文档
+- 2 到 20 人的小型研发团队
+- 已经在使用 Codex，或者计划把 Agent 编程能力引入团队协作流程的团队
+- 希望围绕同一个任务上下文协同推进，而不是每个人单独和 AI 对话
+- 希望把消息、结果、todo、搜索和回放沉淀为长期可复用的项目资产
 
-### Phase 2：MVP 核心协作链路 🔄 进行中
-- [x] monorepo 工程骨架（server / web / packages）
-- [x] 共享会话、todo、搜索、回放、可见性等核心后端能力已落地
-- [x] 合同测试、集成测试、E2E 测试骨架已建立
-- [~] 前后端联调与真实执行链路继续收口
+## 效果预览
 
-### Phase 3：后续扩展能力 ⏳ 暂未进入
-- [ ] Claude Code 兼容接入
-- [ ] 更细粒度权限模型
-- [ ] 多管理节点 / 多 Agent 调度
-- [ ] 更完整的分析与运营能力
+### 会话页总览
 
----
+![SyncAI Session Page](./docs/assets/session-page.png)
 
-## 🔧 技术选型
+### 会话页细节
 
-| 层级 | 当前方案 |
-|------|----------|
-| **后端** | Node.js + TypeScript + Fastify |
-| **前端** | React + Vite + TypeScript |
-| **实时通信** | WebSocket |
-| **数据库** | PostgreSQL |
-| **缓存 / 运行态** | Redis |
-| **共享契约** | `packages/shared` |
-| **测试** | Node `--test` + Playwright |
+![SyncAI Session Page Detail](./docs/assets/session-page-detail.png)
 
----
+> 当前更推荐优先展示会话页，因为它最能体现 SyncAI 的核心价值：共享消息流、协作上下文，以及围绕会话的轻量 todo 跟进。
 
-## 🎯 当前聚焦
+## 项目架构
 
-- 先验证“共享会话 + 协作续写 + 搜索回放 + 轻量 todo”这条最短闭环
-- 当前优先服务小团队，不提前扩张到企业级复杂管理
-- 商业化与更大范围产品化能力保留到 MVP 稳定之后再推进
+SyncAI 采用 monorepo 结构，把前端、后端和共享契约放在同一个仓库中，重点保证协作链路的数据结构一致。
 
----
+```text
+Team Members (Browser)
+        |
+        v
+React + Vite Web App
+        |
+        v
+Fastify API + WebSocket Gateway
+        |
+        v
+Workspace Runtime / Session Scheduler
+        |
+        v
+Codex Adapter
+        |
+        v
+Local Codex CLI Runtime
 
-## 📁 项目结构
-
+PostgreSQL  <--- persistence / messages / sessions / todos / replay
+Redis       <--- queue / runtime state / coordination
+packages/shared <--- shared contracts between server and web
 ```
-sync-ai/
+
+### 架构分层说明
+
+- `web/`：React + Vite 前端，负责团队、项目、会话、消息、todo、搜索与回放体验
+- `server/`：Fastify 后端，负责 HTTP API、WebSocket 实时推送、会话调度和 Agent 接入
+- `packages/shared/`：前后端共享类型、状态枚举和契约，避免数据结构各写一份
+- `PostgreSQL`：持久化团队、项目、会话、消息、todo 和回放记录
+- `Redis`：承载会话排队、运行态和协调状态
+- `Codex Adapter`：把底层 Codex 执行过程映射成平台可展示、可回放的统一记录
+
+## 核心能力
+
+- 共享会话 / 私有会话
+- 团队成员围绕同一个会话持续追加消息
+- WebSocket 实时同步消息、状态与排队信息
+- 会话级 todo 提取与状态更新
+- 消息与最终回复搜索
+- 消息、状态变化、命令摘要回放
+- 团队、项目、会话三级组织结构
+
+## 快速开始
+
+### 前置条件
+
+- Node.js `>= 24`
+- npm
+- Docker Desktop
+- 可用的 Codex CLI（如果你要体验真实 Agent 执行链路）
+
+### 1. 安装依赖
+
+```bash
+npm install
+```
+
+### 2. 配置环境变量
+
+```bash
+cp .env.example .env
+```
+
+Windows PowerShell 也可以直接手动复制 `.env.example` 为 `.env`。
+
+### 3. 启动 PostgreSQL 和 Redis
+
+```bash
+npm run db:up
+```
+
+### 4. 执行数据库迁移
+
+```bash
+npm run db:migrate
+```
+
+### 5. 启动前后端开发环境
+
+```bash
+npm run dev
+```
+
+启动后默认访问：
+
+- Web: `http://localhost:5173`
+- Server: `http://localhost:3001`
+
+### 6. 健康检查
+
+```bash
+npm run doctor
+```
+
+如果你还想顺便验证本机 Codex 可执行状态：
+
+```bash
+npm run doctor -- --with-codex-exec
+```
+
+## 常用命令
+
+```bash
+npm run dev              # 同时启动前后端
+npm run dev:server       # 仅启动后端
+npm run dev:web          # 仅启动前端
+npm run db:up            # 启动 PostgreSQL / Redis
+npm run db:migrate       # 执行数据库迁移
+npm run build            # 构建 shared -> server -> web
+npm run typecheck        # 全仓 TypeScript 校验
+npm run test             # 提交前回归门禁
+npm run test:unit        # 单元测试
+npm run test:contracts   # 契约测试
+npm run test:integration # 集成测试
+npm run test:e2e         # E2E 测试
+npm run test:smoke       # 冒烟测试
+npm run doctor           # 环境自检
+```
+
+## 仓库结构
+
+```text
+.
 ├── server/                 # Fastify 后端与运行时集成
 ├── web/                    # React + Vite 前端
 ├── packages/shared/        # 前后端共享类型与契约
 ├── tests/                  # unit / contracts / integration / e2e / smoke
 ├── scripts/                # 开发、测试与环境诊断脚本
-└── docs/
-    ├── 00-总览/            # 文档入口与阅读说明
-    ├── 01-产品/            # 产品定义、使用说明
-    ├── 02-架构设计/        # 概要设计、数据库、API、Agent 接入
-    ├── 03-开发与测试/      # 开发拆解、测试设计与测试方案
-    ├── 04-评审记录/        # 设计/测试评审与审查记录
-    └── 05-环境与协作/      # 启动说明、协作约束
+└── docs/                   # 产品、架构、测试与协作文档
 ```
 
----
+## 文档导航
 
-## 📚 核心文档导航
+- [产品需求文档](./docs/01-产品/产品需求文档.md)
+- [使用说明](./docs/01-产品/使用说明.md)
+- [概要设计](./docs/02-架构设计/概要设计.md)
+- [Agent 接入设计](./docs/02-架构设计/Agent接入设计.md)
+- [数据库设计](./docs/02-架构设计/数据库设计.md)
+- [API 设计](./docs/02-架构设计/API设计.md)
+- [启动说明](./docs/05-环境与协作/启动说明.md)
+- [Codex 协作约束](./docs/05-环境与协作/Codex协作约束.md)
 
-### 产品与范围
-- **[产品需求文档](./docs/01-产品/产品需求文档.md)** - 当前唯一产品基线、MVP 范围与验收口径
-- **[使用说明](./docs/01-产品/使用说明.md)** - 当前页面与核心操作说明
+## 当前说明
 
-### 设计与接口
-- **[Agent 接入设计](./docs/02-架构设计/Agent接入设计.md)** - Codex 接入、事件映射与恢复约束
-- **[概要设计](./docs/02-架构设计/概要设计.md)** - 模块边界、状态流、部署形态与核心时序主入口
-- **[数据库设计](./docs/02-架构设计/数据库设计.md)** - PostgreSQL / Redis 设计与一致性规则
-- **[API 设计](./docs/02-架构设计/API设计.md)** - HTTP、WebSocket 与内部 Adapter 合同
+- 当前重点聚焦在小团队 AI 编程协作闭环，而不是企业级复杂权限或多 Agent 编排
+- 默认围绕 Codex 接入设计，Claude Code 兼容能力作为后续扩展预留
+- 项目仍在持续迭代中，接口和页面细节可能继续演进
 
-### 开发与测试
-- **[开发任务拆解](./docs/03-开发与测试/开发任务拆解.md)** - 当前实施顺序、里程碑与完成定义
-- **[测试设计](./docs/03-开发与测试/测试设计.md)** - 测试目标、分层与通过标准
-- **[测试用例设计](./docs/03-开发与测试/测试用例设计.md)** - 核心业务用例基线
-- **[测试脚本设计](./docs/03-开发与测试/测试脚本设计.md)** - 自动化脚本分层、夹具与执行策略
+## 开源发布前建议
 
-### 环境与协作
-- **[启动说明](./docs/05-环境与协作/启动说明.md)** - 本地环境启动步骤
-- **[Codex 协作约束](./docs/05-环境与协作/Codex协作约束.md)** - 设计、测试与交付阶段门禁
-- **[文档说明](./docs/00-总览/文档说明.md)** - 文档分类与阅读建议
+如果你准备把项目正式发布到 GitHub，建议在 README 之外再补齐这几项：
 
----
+- `LICENSE`：明确开源协议
+- `CONTRIBUTING.md`：贡献方式、开发流程、提交流程
+- `CODE_OF_CONDUCT.md`：社区协作规范
+- 更完整的截图 / GIF / 演示视频：提升项目首页转化率和理解速度
 
-## 🎯 MVP 范围（Phase 1）
+## 致谢
 
-### ✅ 包含功能
-- 创建团队、项目、共享会话 / 私有会话
-- 团队成员围绕同一个共享会话继续发消息
-- WebSocket 实时同步消息、状态与排队信息
-- 展示 Agent 最终回复与会话运行状态
-- 从消息中手动提取轻量 todo
-- 搜索成员消息与 Agent 最终回复
-- 回放消息、状态变化与命令过程摘要
-- Web 界面（响应式）
-
-### ❌ 暂不包含
-- Claude Code 接入落地
-- IDE 插件
-- 移动端 App
-- 多 Agent 并行编排
-- 多模型切换 UI
-- 企业级复杂权限
-- AI 自动提取 todo
-
----
-
-## 📋 当前状态（2026-04-30）
-
-**阶段：MVP 核心协作链路持续收口中**
-
-### ✅ 已完成
-- 产品、架构、数据库、API、测试、开发拆解文档已定为当前基线
-- 工程骨架已落地：`server`、`web`、`packages/shared`
-- 共享会话、todo、搜索、回放、可见性等核心后端能力已接入当前代码
-- 合同测试、集成测试、E2E、smoke 分层已建立
-- 文档目录已完成按主题重组，旧英文文档已清理
-
-### 🔄 当前主线
-- 继续收口前后端联调体验
-- 继续验证共享会话下的真实执行链路与状态展示
-- 让 README、正式文档与代码实现保持同一口径
-
-### ⏳ 后续
-- 完成 MVP 闭环验收
-- 评估 Claude Code 兼容接入
-- 再决定是否进入更复杂的权限、节点与扩展能力
-
----
-
-**记录时间：** 2026-04-04 00:50 GMT+8  
-**创意发起人：** 阿铁 ⚓
-**最后更新：** 2026-04-30
+SyncAI 站在现有 Agent 编程能力之上，目标不是替代底层工具，而是把团队协作层补完整。

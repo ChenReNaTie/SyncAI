@@ -80,6 +80,10 @@ export interface ProjectsResponse {
   data: Project[];
 }
 
+export interface ProjectDetailResponse {
+  data: Project;
+}
+
 export interface CreateProjectRequest {
   name: string;
   description: string;
@@ -370,6 +374,15 @@ export function getProjects(
   teamId: string,
 ): Promise<ProjectsResponse> {
   return request<ProjectsResponse>(`/teams/${teamId}/projects`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export function getProject(
+  token: string,
+  projectId: string,
+): Promise<ProjectDetailResponse> {
+  return request<ProjectDetailResponse>(`/projects/${projectId}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }

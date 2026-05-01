@@ -12,6 +12,7 @@ import {
   hasStoredAuthSession,
   upsertAgentNode,
   type AgentNode,
+  type Project,
   type TeamMember,
 } from "../api/client.js";
 import { PageShell, GlassCard, Button, Input, Badge, PageLoading } from "../components/index.js";
@@ -20,14 +21,6 @@ interface TeamDetail {
   id: string;
   name: string;
   slug: string;
-  created_at: string;
-}
-
-interface Project {
-  id: string;
-  name: string;
-  description: string;
-  team_id: string;
   created_at: string;
 }
 
@@ -477,6 +470,14 @@ export function TeamPage() {
                   {project.description && (
                     <p className="text-sm text-text-secondary mt-1 truncate">{project.description}</p>
                   )}
+                  <div className="mt-3 rounded-md border border-glass-border/80 bg-glass-bg/40 px-3 py-2">
+                    <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-text-muted">
+                      工作目录
+                    </p>
+                    <p className="mt-1 text-xs text-text-secondary break-all">
+                      {project.working_directory || "未配置工作目录"}
+                    </p>
+                  </div>
                   <p className="text-xs text-text-muted mt-2">
                     {new Date(project.created_at).toLocaleDateString()}
                   </p>

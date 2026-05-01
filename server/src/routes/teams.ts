@@ -802,6 +802,27 @@ export async function registerTeamRoutes(
     });
   });
 
+  app.get("/projects/:projectId", async (request, reply) => {
+    const params = projectParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return sendValidationError(reply, params.error);
+    }
+
+    const access = await requireProjectAccess(
+      app,
+      request,
+      reply,
+      params.data.projectId,
+    );
+    if (!access) {
+      return;
+    }
+
+    return reply.code(200).send({
+      data: serializeProject(access.project),
+    });
+  });
+
   app.patch("/projects/:projectId/archive", async (request, reply) => {
     const params = projectParamsSchema.safeParse(request.params);
     if (!params.success) {
