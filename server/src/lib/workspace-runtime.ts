@@ -15,12 +15,44 @@ import {
   appendMessageFailedEvent,
   appendStatusChangedEvent,
 } from "./session-events.js";
+import type {
+  AgentMessageMetadataShape,
+  AgentSessionConfig,
+} from "./agent-execution.js";
 
 type RuntimeLogger = {
   error: (...args: unknown[]) => void;
 };
 
 const AGENT_SENDER_DISPLAY_NAME = "Codex";
+
+function parseSessionConfig(value: unknown): AgentSessionConfig {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+
+  const config = value as Record<string, unknown>;
+  return {
+    ...(typeof config.model === "string" && config.model.trim().length > 0
+      ? { model: config.model.trim() }
+      : {}),
+    ...(typeof config.reasoning_effort === "string"
+      && config.reasoning_effort.trim().length > 0
+      ? { reasoning_effort: config.reasoning_effort.trim() }
+      : {}),
+    ...(typeof config.approval_policy === "string"
+      && config.approval_policy.trim().length > 0
+      ? { approval_policy: config.approval_policy.trim() }
+      : {}),
+    ...(typeof config.sandbox_mode === "string"
+      && config.sandbox_mode.trim().length > 0
+      ? { sandbox_mode: config.sandbox_mode.trim() }
+      : {}),
+    ...(typeof config.branch === "string" && config.branch.trim().length > 0
+      ? { branch: config.branch.trim() }
+      : {}),
+  };
+}
 
 interface ClaimedMessage {
   sessionId: string;
@@ -221,7 +253,7 @@ export function createWorkspaceRuntime(options: {
            error_summary,
            metadata
          )
-         VALUES ($1, 'agent', NULL, $2, 'completed', TRUE, $3, NULL, NULL, '{}'::jsonb)
+         VALUES ($1, 'agent', NULL, $2, 'completed', TRUE, $3, NULL, NULL, $4::jsonb)
          RETURNING
            id,
            session_id,
@@ -234,7 +266,14 @@ export function createWorkspaceRuntime(options: {
            error_summary,
            metadata,
            created_at`,
-        [message.sessionId, result.finalReply, nextSequence],
+        [
+          message.sessionId,
+          result.finalReply,
+          nextSequence,
+          JSON.stringify(
+            (result.metadata ?? {}) satisfies AgentMessageMetadataShape,
+          ),
+        ],
       );
 
       const agentMessageRow = agentMessageResult.rows[0];
@@ -410,20 +449,23 @@ export function createWorkspaceRuntime(options: {
       try {
         // Resolve working directory from the project linked to this session
         let workingDirectory: string | undefined;
+        let sessionConfig: AgentSessionConfig = {};
         try {
           const wdResult = await options.db.query(
-            `SELECT p.working_directory
+            `SELECT p.working_directory, s.agent_config
              FROM sessions s
              JOIN projects p ON p.id = s.project_id
              WHERE s.id = $1`,
             [message.sessionId],
           );
           workingDirectory = wdResult.rows[0]?.working_directory ?? undefined;
+          sessionConfig = parseSessionConfig(wdResult.rows[0]?.agent_config);
         } catch {
           // Best effort — fall back to adapter default
         }
 
         let finalText = "";
+        let result: MockAgentResult | null = null;
 
         const sendInput: SendMessageInput = {
           sessionId: message.sessionId,
@@ -436,8 +478,32 @@ export function createWorkspaceRuntime(options: {
         if (workingDirectory) {
           sendInput.workingDirectory = workingDirectory;
         }
+        if (sessionConfig.model) {
+          sendInput.model = sessionConfig.model;
+        }
+        if (sessionConfig.reasoning_effort) {
+          sendInput.modelReasoningEffort = sessionConfig.reasoning_effort;
+        }
+        if (sessionConfig.approval_policy) {
+          sendInput.approvalPolicy = sessionConfig.approval_policy;
+        }
+        if (sessionConfig.sandbox_mode) {
+          sendInput.sandboxMode = sessionConfig.sandbox_mode;
+        }
+        if (sessionConfig.branch) {
+          sendInput.branch = sessionConfig.branch;
+        }
 
-        for await (const event of adapter.sendMessage(sendInput)) {
+        const stream = adapter.sendMessage(sendInput);
+
+        while (true) {
+          const next = await stream.next();
+          if (next.done) {
+            result = next.value;
+            break;
+          }
+
+          const event = next.value;
           if (
             event.type === "thread.started" &&
             event.data &&
@@ -473,12 +539,12 @@ export function createWorkspaceRuntime(options: {
           }
         }
 
-        const result: MockAgentResult = {
+        const finalizedResult: MockAgentResult = result ?? {
           summary: finalText.slice(0, 160),
           finalReply: finalText || "Codex completed with no output.",
         };
 
-        const hasQueuedMessages = await finalizeSuccess(message, result);
+        const hasQueuedMessages = await finalizeSuccess(message, finalizedResult);
         if (!hasQueuedMessages) {
           return;
         }

@@ -1,6 +1,25 @@
 import { existsSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { delimiter, join } from "node:path";
 import { Codex } from "@openai/codex-sdk";
+import type {
+  CommandExecutionItem,
+  FileChangeItem,
+  ThreadOptions,
+  Usage,
+} from "@openai/codex-sdk";
+import {
+  buildAgentMessageMetadata,
+  captureWorkspaceSnapshot,
+  listCodexApprovalPolicies,
+  listCodexReasoningEfforts,
+  listCodexSandboxModes,
+} from "./codex-observability.js";
+import type {
+  AgentCommandTrace,
+  AgentFileTrace,
+  AgentUsageTrace,
+} from "./agent-execution.js";
 import type {
   MockAgentAdapter,
   MockAgentResult,
@@ -18,6 +37,13 @@ export class CodexWorkingDirectoryError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "CodexWorkingDirectoryError";
+  }
+}
+
+export class CodexBranchSwitchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CodexBranchSwitchError";
   }
 }
 
@@ -156,6 +182,74 @@ export function requireCodexWorkingDirectory(workingDirectory?: string) {
   return normalizedPath;
 }
 
+function runGit(workingDirectory: string, args: string[]) {
+  return spawnSync("git", args, {
+    cwd: workingDirectory,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+}
+
+function ensureGitBranch(workingDirectory: string, branch?: string) {
+  const normalizedBranch = branch?.trim();
+  if (!normalizedBranch) {
+    return;
+  }
+
+  const currentBranch = runGit(workingDirectory, ["branch", "--show-current"]);
+  if (currentBranch.status === 0 && String(currentBranch.stdout ?? "").trim() === normalizedBranch) {
+    return;
+  }
+
+  const knownBranch = runGit(workingDirectory, ["rev-parse", "--verify", normalizedBranch]);
+  if (knownBranch.status !== 0) {
+    throw new CodexBranchSwitchError(
+      `Configured branch does not exist in this workspace: ${normalizedBranch}.`,
+    );
+  }
+
+  const switched = runGit(workingDirectory, ["switch", normalizedBranch]);
+  if (switched.status !== 0) {
+    const stderr = String(switched.stderr ?? "").trim();
+    throw new CodexBranchSwitchError(
+      stderr.length > 0
+        ? `Failed to switch workspace branch to ${normalizedBranch}: ${stderr}`
+        : `Failed to switch workspace branch to ${normalizedBranch}.`,
+    );
+  }
+}
+
+function buildThreadOptions(input: SendMessageInput, workingDirectory: string): ThreadOptions {
+  const supportedSandboxModes = new Set(listCodexSandboxModes());
+  const supportedReasoningEfforts = new Set(listCodexReasoningEfforts(input.model));
+  const supportedApprovalPolicies = new Set(listCodexApprovalPolicies());
+  const options: ThreadOptions = {
+    workingDirectory,
+    skipGitRepoCheck: true,
+  };
+
+  if (input.model) {
+    options.model = input.model;
+  }
+  if (input.sandboxMode && supportedSandboxModes.has(input.sandboxMode)) {
+    options.sandboxMode =
+      input.sandboxMode as NonNullable<ThreadOptions["sandboxMode"]>;
+  }
+  if (
+    input.modelReasoningEffort
+    && supportedReasoningEfforts.has(input.modelReasoningEffort)
+  ) {
+    options.modelReasoningEffort =
+      input.modelReasoningEffort as NonNullable<ThreadOptions["modelReasoningEffort"]>;
+  }
+  if (input.approvalPolicy && supportedApprovalPolicies.has(input.approvalPolicy)) {
+    options.approvalPolicy =
+      input.approvalPolicy as NonNullable<ThreadOptions["approvalPolicy"]>;
+  }
+
+  return options;
+}
+
 export function createCodexAgentAdapter(options: {
   codexPath?: string;
 } = {}): MockAgentAdapter {
@@ -204,17 +298,19 @@ export function createCodexAgentAdapter(options: {
           ) ?? sessionState.threadId;
       }
 
+      ensureGitBranch(sessionState.workingDirectory, input.branch);
+      const threadOptions = buildThreadOptions(input, sessionState.workingDirectory);
+
       const thread = sessionState.threadId
-        ? codex.resumeThread(sessionState.threadId, {
-            workingDirectory: sessionState.workingDirectory,
-            skipGitRepoCheck: true,
-          })
-        : codex.startThread({
-            workingDirectory: sessionState.workingDirectory,
-            skipGitRepoCheck: true,
-          });
+        ? codex.resumeThread(sessionState.threadId, threadOptions)
+        : codex.startThread(threadOptions);
 
       let finalResponse = "";
+      let usageTrace: AgentUsageTrace | undefined;
+      const commands = new Map<string, AgentCommandTrace>();
+      const files = new Map<string, AgentFileTrace>();
+      const turnStartedAt = new Date();
+      const snapshot = captureWorkspaceSnapshot(sessionState.workingDirectory);
 
       const streamedTurn = await thread.runStreamed(input.content);
 
@@ -246,13 +342,67 @@ export function createCodexAgentAdapter(options: {
         ) {
           finalResponse = String(event.item.text);
         }
+
+        if (
+          "item" in event &&
+          event.item &&
+          typeof event.item === "object" &&
+          "type" in event.item &&
+          event.item.type === "command_execution"
+        ) {
+          const item = event.item as CommandExecutionItem;
+          commands.set(item.id, {
+            command: item.command,
+            cwd: sessionState.workingDirectory,
+            output: item.aggregated_output,
+            exit_code: item.exit_code ?? null,
+            status: item.status,
+          });
+        }
+
+        if (
+          "item" in event &&
+          event.item &&
+          typeof event.item === "object" &&
+          "type" in event.item &&
+          event.item.type === "file_change"
+        ) {
+          const item = event.item as FileChangeItem;
+          for (const change of item.changes) {
+            files.set(change.path, {
+              path: change.path,
+              kind: change.kind,
+            });
+          }
+        }
+
+        if (event.type === "turn.completed") {
+          const usage = event.usage as Usage;
+          usageTrace = {
+            input_tokens: usage.input_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            output_tokens: usage.output_tokens,
+            reasoning_output_tokens: usage.reasoning_output_tokens,
+          };
+        }
       }
 
       const summary = finalResponse.slice(0, 160);
+      const turnCompletedAt = new Date();
 
       return {
         summary,
         finalReply: finalResponse || "Codex completed with no output.",
+        metadata: buildAgentMessageMetadata({
+          workingDirectory: sessionState.workingDirectory,
+          turnStartedAt,
+          turnCompletedAt,
+          snapshot,
+          fallbackCommands: [...commands.values()],
+          fallbackFiles: [...files.values()],
+          ...(sessionState.threadId ? { threadId: sessionState.threadId } : {}),
+          ...(usageTrace ? { usage: usageTrace } : {}),
+        }),
       };
     },
   };

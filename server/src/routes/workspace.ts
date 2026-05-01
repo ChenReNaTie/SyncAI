@@ -11,6 +11,18 @@ import {
   appendStatusChangedEvent,
 } from "../lib/session-events.js";
 import { verifyAccessToken } from "../lib/auth.js";
+import { resolvePersistedCodexThreadId } from "../lib/codex-agent-adapter.js";
+import type { AgentSessionConfig } from "../lib/agent-execution.js";
+import {
+  buildSessionAgentRuntime,
+  listCodexApprovalPolicies,
+  listCodexModels,
+  listCodexReasoningEfforts,
+  listCodexSandboxModes,
+  listConfiguredModels,
+  listWorkspaceBranches,
+  readCodexConfigDefaults,
+} from "../lib/codex-observability.js";
 
 const sessionCreateSchema = z.object({
   title: z.string().trim().min(1).max(200),
@@ -48,6 +60,14 @@ const todoPatchSchema = z.object({
   status: z.enum(todoStatusValues),
 });
 
+const agentConfigPatchSchema = z.object({
+  model: z.string().trim().min(1).max(200).optional(),
+  reasoning_effort: z.string().trim().min(1).max(100).optional(),
+  approval_policy: z.string().trim().min(1).max(100).optional(),
+  sandbox_mode: z.string().trim().min(1).max(100).optional(),
+  branch: z.string().trim().min(1).max(300).optional(),
+});
+
 const actorHeaderSchema = z.string().uuid();
 const optionalCursorProjectIdSchema = z.union([z.string().uuid(), z.literal("")]);
 const optionalCursorVisibilitySchema = z.union([
@@ -82,10 +102,54 @@ function asIso(value: unknown) {
   return new Date(String(value)).toISOString();
 }
 
+function parseStoredAgentConfig(value: unknown): AgentSessionConfig {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+
+  const config = value as Record<string, unknown>;
+  return {
+    ...(typeof config.model === "string" && config.model.trim().length > 0
+      ? { model: config.model.trim() }
+      : {}),
+    ...(typeof config.reasoning_effort === "string"
+      && config.reasoning_effort.trim().length > 0
+      ? { reasoning_effort: config.reasoning_effort.trim() }
+      : {}),
+    ...(typeof config.approval_policy === "string"
+      && config.approval_policy.trim().length > 0
+      ? { approval_policy: config.approval_policy.trim() }
+      : {}),
+    ...(typeof config.sandbox_mode === "string"
+      && config.sandbox_mode.trim().length > 0
+      ? { sandbox_mode: config.sandbox_mode.trim() }
+      : {}),
+    ...(typeof config.branch === "string" && config.branch.trim().length > 0
+      ? { branch: config.branch.trim() }
+      : {}),
+  };
+}
+
 function sendValidationError(reply: FastifyReply, error: z.ZodError) {
   return reply.code(400).send({
     code: "INVALID_REQUEST",
     details: error.flatten(),
+  });
+}
+
+function sendInvalidFieldOption(
+  reply: FastifyReply,
+  field: string,
+  message: string,
+) {
+  return reply.code(400).send({
+    code: "INVALID_REQUEST",
+    details: {
+      formErrors: [],
+      fieldErrors: {
+        [field]: [message],
+      },
+    },
   });
 }
 
@@ -364,6 +428,165 @@ async function loadSessionDetail(app: FastifyInstance, sessionId: string) {
   );
 
   return result.rows[0];
+}
+
+async function loadSessionAgentContext(
+  app: FastifyInstance,
+  sessionId: string,
+) {
+  const result = await app.db.query(
+    `SELECT
+       s.bound_agent_session_ref,
+       p.working_directory,
+       agent_message.metadata AS latest_agent_metadata
+     FROM sessions s
+     JOIN projects p ON p.id = s.project_id
+     LEFT JOIN LATERAL (
+       SELECT metadata
+       FROM messages
+       WHERE session_id = s.id
+         AND sender_type = 'agent'
+         AND is_final_reply = TRUE
+       ORDER BY sequence_no DESC
+       LIMIT 1
+     ) AS agent_message ON TRUE
+     WHERE s.id = $1
+       AND s.archived_at IS NULL
+       AND p.archived_at IS NULL`,
+    [sessionId],
+  );
+
+  const row = result.rows[0];
+  if (!row) {
+    return null;
+  }
+
+  const threadId =
+    typeof row.bound_agent_session_ref === "string"
+      ? resolvePersistedCodexThreadId(
+          sessionId,
+          String(row.bound_agent_session_ref),
+        )
+      : undefined;
+
+  const workingDirectory =
+    typeof row.working_directory === "string"
+      ? String(row.working_directory)
+      : undefined;
+  const latestMetadata =
+    row.latest_agent_metadata && typeof row.latest_agent_metadata === "object"
+      ? (row.latest_agent_metadata as Record<string, unknown>)
+      : undefined;
+
+  return buildSessionAgentRuntime({
+    ...(threadId ? { threadId } : {}),
+    ...(workingDirectory ? { workingDirectory } : {}),
+    ...(latestMetadata ? { latestMetadata } : {}),
+  });
+}
+
+function mergeOptionValues(
+  primary: string[],
+  extras: Array<string | null | undefined>,
+) {
+  return [...new Set(
+    [...primary, ...extras]
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      .map((value) => value.trim()),
+  )];
+}
+
+async function loadSessionAgentSettings(
+  app: FastifyInstance,
+  sessionId: string,
+) {
+  const result = await app.db.query(
+    `SELECT
+       s.agent_config,
+       s.bound_agent_session_ref,
+       p.working_directory,
+       agent_message.metadata AS latest_agent_metadata
+     FROM sessions s
+     JOIN projects p ON p.id = s.project_id
+     LEFT JOIN LATERAL (
+       SELECT metadata
+       FROM messages
+       WHERE session_id = s.id
+         AND sender_type = 'agent'
+         AND is_final_reply = TRUE
+       ORDER BY sequence_no DESC
+       LIMIT 1
+     ) AS agent_message ON TRUE
+     WHERE s.id = $1
+       AND s.archived_at IS NULL
+       AND p.archived_at IS NULL`,
+    [sessionId],
+  );
+
+  const row = result.rows[0];
+  if (!row) {
+    return null;
+  }
+
+  const selected = parseStoredAgentConfig(row.agent_config);
+  const threadId =
+    typeof row.bound_agent_session_ref === "string"
+      ? resolvePersistedCodexThreadId(
+          sessionId,
+          String(row.bound_agent_session_ref),
+        )
+      : undefined;
+  const workingDirectory =
+    typeof row.working_directory === "string"
+      ? String(row.working_directory)
+      : undefined;
+  const latestMetadata =
+    row.latest_agent_metadata && typeof row.latest_agent_metadata === "object"
+      ? (row.latest_agent_metadata as Record<string, unknown>)
+      : undefined;
+  const runtime = buildSessionAgentRuntime({
+    ...(threadId ? { threadId } : {}),
+    ...(workingDirectory ? { workingDirectory } : {}),
+    ...(latestMetadata ? { latestMetadata } : {}),
+  });
+  const defaults = readCodexConfigDefaults();
+  const selectedModel = selected.model ?? runtime?.model ?? defaults.model ?? null;
+  const models = mergeOptionValues(
+    [...listCodexModels(), ...listConfiguredModels()],
+    [runtime?.model, selected.model, defaults.model],
+  );
+  const reasoningEfforts = mergeOptionValues(
+    listCodexReasoningEfforts(selectedModel),
+    [
+      selected.reasoning_effort,
+      runtime?.reasoning_effort,
+      defaults.reasoningEffort,
+    ],
+  );
+  const sandboxModes = mergeOptionValues(
+    listCodexSandboxModes(),
+    [selected.sandbox_mode, runtime?.sandbox_mode, defaults.sandboxMode],
+  );
+  const approvalPolicies = mergeOptionValues(
+    listCodexApprovalPolicies(),
+    [selected.approval_policy, runtime?.approval_policy, defaults.approvalPolicy],
+  );
+  const branches = mergeOptionValues(
+    listWorkspaceBranches(workingDirectory),
+    [selected.branch, runtime?.branch],
+  );
+
+  return {
+    selected,
+    runtime,
+    options: {
+      models,
+      reasoning_efforts: reasoningEfforts,
+      approval_policies: approvalPolicies,
+      sandbox_modes: sandboxModes,
+      branches,
+    },
+  };
 }
 
 async function loadProjectContext(app: FastifyInstance, projectId: string) {
@@ -876,6 +1099,204 @@ export async function registerWorkspaceRoutes(
 
     return {
       data: serializeSession(session),
+    };
+  });
+
+  app.get("/sessions/:sessionId/agent-context", async (request, reply) => {
+    const params = z
+      .object({
+        sessionId: z.string().uuid(),
+      })
+      .safeParse(request.params);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error);
+    }
+
+    const access = await requireVisibleSession(
+      app,
+      request,
+      reply,
+      params.data.sessionId,
+    );
+    if (!access) {
+      return;
+    }
+
+    const context = await loadSessionAgentContext(app, params.data.sessionId);
+
+    return {
+      data: context,
+    };
+  });
+
+  app.get("/sessions/:sessionId/agent-config", async (request, reply) => {
+    const params = z
+      .object({
+        sessionId: z.string().uuid(),
+      })
+      .safeParse(request.params);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error);
+    }
+
+    const access = await requireVisibleSession(
+      app,
+      request,
+      reply,
+      params.data.sessionId,
+    );
+    if (!access) {
+      return;
+    }
+
+    const config = await loadSessionAgentSettings(app, params.data.sessionId);
+    return {
+      data: config,
+    };
+  });
+
+  app.patch("/sessions/:sessionId/agent-config", async (request, reply) => {
+    const params = z
+      .object({
+        sessionId: z.string().uuid(),
+      })
+      .safeParse(request.params);
+
+    if (!params.success) {
+      return sendValidationError(reply, params.error);
+    }
+
+    const body = agentConfigPatchSchema.safeParse(request.body);
+    if (!body.success) {
+      return sendValidationError(reply, body.error);
+    }
+
+    const access = await requireVisibleSession(
+      app,
+      request,
+      reply,
+      params.data.sessionId,
+      {
+        requireCreator: true,
+      },
+    );
+    if (!access) {
+      return;
+    }
+
+    const currentSettings = await loadSessionAgentSettings(app, params.data.sessionId);
+    if (!currentSettings) {
+      return reply.code(404).send({ code: "SESSION_NOT_FOUND" });
+    }
+
+    const nextConfig = parseStoredAgentConfig({
+      ...currentSettings.selected,
+      ...body.data,
+    });
+    const defaults = readCodexConfigDefaults();
+    const nextModel =
+      nextConfig.model
+      ?? currentSettings.runtime?.model
+      ?? defaults.model
+      ?? null;
+
+    if (body.data.model) {
+      const knownModels = new Set<string>(currentSettings.options.models);
+      if (knownModels.size > 0 && !knownModels.has(body.data.model)) {
+        return sendInvalidFieldOption(
+          reply,
+          "model",
+          "Model is not available in the current Codex configuration",
+        );
+      }
+    }
+
+    const availableReasoningEfforts = mergeOptionValues(
+      listCodexReasoningEfforts(nextModel),
+      [
+        currentSettings.runtime?.reasoning_effort,
+        defaults.reasoningEffort,
+      ],
+    );
+    if (
+      body.data.reasoning_effort
+      && availableReasoningEfforts.length > 0
+      && !availableReasoningEfforts.includes(body.data.reasoning_effort)
+    ) {
+      return sendInvalidFieldOption(
+        reply,
+        "reasoning_effort",
+        "Reasoning effort is not supported by the selected Codex model",
+      );
+    }
+
+    if (
+      nextConfig.reasoning_effort
+      && availableReasoningEfforts.length > 0
+      && !availableReasoningEfforts.includes(nextConfig.reasoning_effort)
+    ) {
+      nextConfig.reasoning_effort =
+        availableReasoningEfforts[0]
+        ?? currentSettings.runtime?.reasoning_effort
+        ?? defaults.reasoningEffort
+        ?? null;
+    }
+
+    if (body.data.approval_policy) {
+      const knownApprovalPolicies = new Set<string>(
+        currentSettings.options.approval_policies,
+      );
+      if (
+        knownApprovalPolicies.size > 0
+        && !knownApprovalPolicies.has(body.data.approval_policy)
+      ) {
+        return sendInvalidFieldOption(
+          reply,
+          "approval_policy",
+          "Approval policy is not available in the current Codex CLI",
+        );
+      }
+    }
+
+    if (body.data.sandbox_mode) {
+      const knownSandboxModes = new Set<string>(currentSettings.options.sandbox_modes);
+      if (knownSandboxModes.size > 0 && !knownSandboxModes.has(body.data.sandbox_mode)) {
+        return sendInvalidFieldOption(
+          reply,
+          "sandbox_mode",
+          "Sandbox mode is not available in the current Codex CLI",
+        );
+      }
+    }
+
+    if (body.data.branch) {
+      const knownBranches = new Set<string>(currentSettings.options.branches);
+      if (knownBranches.size > 0 && !knownBranches.has(body.data.branch)) {
+        return sendInvalidFieldOption(
+          reply,
+          "branch",
+          "Branch does not exist in the current workspace",
+        );
+      }
+    }
+
+    await app.db.query(
+      `UPDATE sessions
+       SET agent_config = $2::jsonb,
+           updated_at = now()
+       WHERE id = $1
+         AND archived_at IS NULL`,
+      [
+        params.data.sessionId,
+        JSON.stringify(nextConfig),
+      ],
+    );
+
+    const updated = await loadSessionAgentSettings(app, params.data.sessionId);
+    return {
+      data: updated,
     };
   });
 

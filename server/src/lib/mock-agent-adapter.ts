@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { AgentMessageMetadataShape } from "./agent-execution.js";
 
 function sleep(durationMs: number) {
   if (durationMs <= 0) {
@@ -42,11 +43,17 @@ export interface SendMessageInput {
   content: string;
   agentSessionRef?: string;
   workingDirectory?: string;
+  model?: string;
+  modelReasoningEffort?: string;
+  approvalPolicy?: string;
+  sandboxMode?: string;
+  branch?: string;
 }
 
 export interface MockAgentResult {
   summary: string;
   finalReply: string;
+  metadata?: AgentMessageMetadataShape;
 }
 
 export interface StreamEvent {
@@ -152,6 +159,59 @@ export function createMockAgentAdapter(options: {
       return {
         summary: `Mock Codex reviewed the member request: ${truncate(normalized, 160)}`,
         finalReply: finalText,
+        metadata: {
+          codex_runtime: {
+            thread_id: "mock-thread-001",
+            model: input.model ?? "mock-gpt",
+            model_provider: "mock",
+            reasoning_effort: input.modelReasoningEffort ?? "medium",
+            approval_policy: input.approvalPolicy ?? "never",
+            sandbox_mode: input.sandboxMode ?? "workspace-write",
+            network_access: false,
+            branch: input.branch ?? "mock/main",
+            working_directory: input.workingDirectory ?? null,
+            cli_version: "mock",
+            source: "mock",
+          },
+          execution_trace: {
+            commands: [
+              {
+                command: "ls -la",
+                cwd: input.workingDirectory ?? null,
+                output: "total 42\n-rw-r--r-- 1 user user 1234 file.txt",
+                exit_code: 0,
+                status: "completed",
+                duration_ms: latencyMs,
+              },
+            ],
+            files: [
+              {
+                path: "src/mock-file.ts",
+                kind: "update",
+              },
+            ],
+            file_diffs: [
+              {
+                path: "src/mock-file.ts",
+                kind: "update",
+                patch: [
+                  "diff --git a/src/mock-file.ts b/src/mock-file.ts",
+                  "--- a/src/mock-file.ts",
+                  "+++ b/src/mock-file.ts",
+                  "@@ -1,2 +1,3 @@",
+                  " export const mock = true;",
+                  "+export const updatedByMock = true;",
+                ].join("\n"),
+              },
+            ],
+          },
+          usage: {
+            input_tokens: 150,
+            cached_input_tokens: 0,
+            output_tokens: 80,
+            reasoning_output_tokens: 24,
+          },
+        },
       };
     },
   };

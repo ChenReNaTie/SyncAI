@@ -5,14 +5,31 @@ import {
   createTodo,
   getMessages,
   getReplay,
+  getSessionAgentConfig,
+  getSessionAgentContext,
   getSessionDetail,
   getStoredAuthToken,
   getTodos,
   hasStoredAuthSession,
   sendMessage,
+  updateSessionAgentConfig,
   updateTodoStatus,
 } from "../api/client.js";
-import type { Message, ReplayEntry, SessionDetail, Todo, TodoStatus } from "../api/client.js";
+import type {
+  AgentCommandTrace,
+  AgentConfigState,
+  AgentFileDiffTrace,
+  AgentFileTrace,
+  AgentMessageMetadata,
+  AgentRuntimeInfo,
+  AgentSessionConfig,
+  AgentUsageTrace,
+  Message,
+  ReplayEntry,
+  SessionDetail,
+  Todo,
+  TodoStatus,
+} from "../api/client.js";
 import { createSessionSocket } from "../api/socket.js";
 import { Badge, GlassCard, PageLoading, PageShell } from "../components/index.js";
 
@@ -44,7 +61,6 @@ interface RenderedEvent {
 interface MessagePresenter {
   id: string;
   label: string;
-  secondaryLabel: string;
   avatarText: string;
   tone: "human" | "agent";
 }
@@ -144,18 +160,10 @@ function getMessagePresenter(message: Message): MessagePresenter {
     ?? enriched.author_name
     ?? (agent ? "协作助手" : message.sender === "user" ? "团队成员" : message.sender);
 
-  const secondaryLabel = agent
-    ? "助手回复"
-    : enriched.sender_role === "admin"
-      ? "管理员"
-      : enriched.sender_role === "member"
-        ? "协作成员"
-        : "共享会话成员";
 
   return {
     id: enriched.sender_user_id ?? enriched.author_id ?? label,
     label,
-    secondaryLabel,
     avatarText: agent ? "助手" : getInitials(label),
     tone: agent ? "agent" : "human",
   };
@@ -373,6 +381,304 @@ function renderItemRow(
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function sanitizeCommandTrace(value: unknown): AgentCommandTrace | null {
+  if (!isRecord(value) || typeof value.command !== "string" || typeof value.status !== "string") {
+    return null;
+  }
+
+  return {
+    command: value.command,
+    status: value.status,
+    cwd: typeof value.cwd === "string" ? value.cwd : null,
+    output: typeof value.output === "string" ? value.output : null,
+    exit_code: typeof value.exit_code === "number" ? value.exit_code : null,
+    duration_ms: typeof value.duration_ms === "number" ? value.duration_ms : null,
+  };
+}
+
+function sanitizeFileTrace(value: unknown): AgentFileTrace | null {
+  if (!isRecord(value) || typeof value.path !== "string" || typeof value.kind !== "string") {
+    return null;
+  }
+
+  if (!["add", "delete", "update"].includes(value.kind)) {
+    return null;
+  }
+
+  return {
+    path: value.path,
+    kind: value.kind as AgentFileTrace["kind"],
+  };
+}
+
+function sanitizeFileDiffTrace(value: unknown): AgentFileDiffTrace | null {
+  const file = sanitizeFileTrace(value);
+  if (!file || !isRecord(value) || typeof value.patch !== "string") {
+    return null;
+  }
+
+  return {
+    ...file,
+    patch: value.patch,
+  };
+}
+
+function sanitizeUsageTrace(value: unknown): AgentUsageTrace | null {
+  if (
+    !isRecord(value)
+    || typeof value.input_tokens !== "number"
+    || typeof value.cached_input_tokens !== "number"
+    || typeof value.output_tokens !== "number"
+  ) {
+    return null;
+  }
+
+  return {
+    input_tokens: value.input_tokens,
+    cached_input_tokens: value.cached_input_tokens,
+    output_tokens: value.output_tokens,
+    ...(typeof value.reasoning_output_tokens === "number"
+      ? { reasoning_output_tokens: value.reasoning_output_tokens }
+      : {}),
+  };
+}
+
+function sanitizeRuntimeInfo(value: unknown): AgentRuntimeInfo | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  return {
+    ...(typeof value.thread_id === "string" ? { thread_id: value.thread_id } : {}),
+    model: typeof value.model === "string" ? value.model : null,
+    model_provider: typeof value.model_provider === "string" ? value.model_provider : null,
+    reasoning_effort:
+      typeof value.reasoning_effort === "string" ? value.reasoning_effort : null,
+    approval_policy:
+      typeof value.approval_policy === "string" ? value.approval_policy : null,
+    sandbox_mode: typeof value.sandbox_mode === "string" ? value.sandbox_mode : null,
+    network_access:
+      typeof value.network_access === "boolean" ? value.network_access : null,
+    branch: typeof value.branch === "string" ? value.branch : null,
+    working_directory:
+      typeof value.working_directory === "string" ? value.working_directory : null,
+    cli_version: typeof value.cli_version === "string" ? value.cli_version : null,
+    source: typeof value.source === "string" ? value.source : null,
+  };
+}
+
+function parseAgentMetadata(metadata: Record<string, unknown> | undefined): AgentMessageMetadata | null {
+  if (!metadata || !isRecord(metadata)) {
+    return null;
+  }
+
+  const runtime = sanitizeRuntimeInfo(metadata.codex_runtime);
+  const executionTrace = isRecord(metadata.execution_trace)
+    ? {
+        commands: Array.isArray(metadata.execution_trace.commands)
+          ? metadata.execution_trace.commands
+              .map((command) => sanitizeCommandTrace(command))
+              .filter((command): command is AgentCommandTrace => command !== null)
+          : [],
+        files: Array.isArray(metadata.execution_trace.files)
+          ? metadata.execution_trace.files
+              .map((file) => sanitizeFileTrace(file))
+              .filter((file): file is AgentFileTrace => file !== null)
+          : [],
+        file_diffs: Array.isArray(metadata.execution_trace.file_diffs)
+          ? metadata.execution_trace.file_diffs
+              .map((diff) => sanitizeFileDiffTrace(diff))
+              .filter((diff): diff is AgentFileDiffTrace => diff !== null)
+          : [],
+      }
+    : undefined;
+  const usage = sanitizeUsageTrace(metadata.usage);
+
+  if (!runtime && !executionTrace && !usage) {
+    return null;
+  }
+
+  return {
+    ...(runtime ? { codex_runtime: runtime } : {}),
+    ...(executionTrace ? { execution_trace: executionTrace } : {}),
+    ...(usage ? { usage } : {}),
+  };
+}
+
+function getLatestAgentRuntime(messages: Message[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message) {
+      continue;
+    }
+    if (!isAgentSender(message.sender)) {
+      continue;
+    }
+
+    const metadata = parseAgentMetadata(message.metadata);
+    if (metadata?.codex_runtime) {
+      return metadata.codex_runtime;
+    }
+  }
+
+  return null;
+}
+
+function formatReasoningEffort(value?: string | null) {
+  switch (value) {
+    case "minimal":
+      return "Minimal";
+    case "low":
+      return "Low";
+    case "medium":
+      return "Medium";
+    case "high":
+      return "High";
+    case "xhigh":
+      return "XHigh";
+    default:
+      return value ?? "等待首轮执行";
+  }
+}
+
+function formatSandboxMode(value?: string | null) {
+  switch (value) {
+    case "danger-full-access":
+      return "完全访问";
+    case "workspace-write":
+      return "工作区可写";
+    case "read-only":
+      return "只读";
+    case "unelevated":
+      return "默认权限";
+    default:
+      return value ?? "等待首轮执行";
+  }
+}
+
+function formatApprovalPolicy(value?: string | null) {
+  switch (value) {
+    case "never":
+      return "从不审批";
+    case "on-request":
+      return "按需审批";
+    case "on-failure":
+      return "失败后审批";
+    case "untrusted":
+      return "仅不可信命令审批";
+    default:
+      return value ?? "-";
+  }
+}
+
+function formatNetworkAccess(value?: boolean | null) {
+  if (value === true) {
+    return "已启用";
+  }
+  if (value === false) {
+    return "已限制";
+  }
+  return "未知";
+}
+
+function formatCommandStatus(status: string) {
+  switch (status) {
+    case "completed":
+      return "已完成";
+    case "declined":
+      return "已拒绝";
+    case "approved":
+      return "已批准";
+    case "failed":
+      return "失败";
+    case "in_progress":
+      return "执行中";
+    default:
+      return status;
+  }
+}
+
+function formatDuration(durationMs?: number | null) {
+  if (typeof durationMs !== "number" || Number.isNaN(durationMs)) {
+    return null;
+  }
+
+  if (durationMs < 1000) {
+    return `${durationMs} ms`;
+  }
+
+  return `${(durationMs / 1000).toFixed(durationMs >= 10_000 ? 0 : 1)} s`;
+}
+
+function formatUsageSummary(usage?: AgentUsageTrace | null) {
+  if (!usage) {
+    return null;
+  }
+
+  const summary = [
+    `输入 ${usage.input_tokens}`,
+    `缓存 ${usage.cached_input_tokens}`,
+    `输出 ${usage.output_tokens}`,
+  ];
+
+  if (typeof usage.reasoning_output_tokens === "number") {
+    summary.push(`推理 ${usage.reasoning_output_tokens}`);
+  }
+
+  return `Token 用量：${summary.join(" / ")}`;
+}
+
+function formatFileKind(kind: AgentFileTrace["kind"]) {
+  switch (kind) {
+    case "add":
+      return "新增";
+    case "delete":
+      return "删除";
+    case "update":
+      return "修改";
+    default:
+      return kind;
+  }
+}
+
+function getDiffLineClass(line: string) {
+  if (line.startsWith("@@")) {
+    return "session-diff-line session-diff-line--hunk";
+  }
+  if (line.startsWith("+") && !line.startsWith("+++")) {
+    return "session-diff-line session-diff-line--add";
+  }
+  if (line.startsWith("-") && !line.startsWith("---")) {
+    return "session-diff-line session-diff-line--remove";
+  }
+  if (
+    line.startsWith("diff --git")
+    || line.startsWith("index ")
+    || line.startsWith("--- ")
+    || line.startsWith("+++ ")
+    || line.startsWith("new file mode")
+    || line.startsWith("deleted file mode")
+  ) {
+    return "session-diff-line session-diff-line--meta";
+  }
+  return "session-diff-line";
+}
+
+function hasExecutionDetails(metadata: AgentMessageMetadata | null) {
+  if (!metadata) {
+    return false;
+  }
+
+  const commandCount = metadata.execution_trace?.commands.length ?? 0;
+  const fileCount = metadata.execution_trace?.files.length ?? 0;
+  const diffCount = metadata.execution_trace?.file_diffs.length ?? 0;
+  return Boolean(commandCount || fileCount || diffCount);
+}
+
 export function SessionPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const location = useLocation();
@@ -384,6 +690,10 @@ export function SessionPage() {
   const highlightTimerRef = useRef<number | null>(null);
 
   const [session, setSession] = useState<SessionDetail | null>(null);
+  const [agentContext, setAgentContext] = useState<AgentRuntimeInfo | null>(null);
+  const [agentConfig, setAgentConfig] = useState<AgentConfigState | null>(null);
+  const [agentConfigSaving, setAgentConfigSaving] = useState<string | null>(null);
+  const [agentConfigError, setAgentConfigError] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -426,6 +736,44 @@ export function SessionPage() {
   const visibleEvents = renderedEvents.slice(-10);
   const hiddenEventCount = Math.max(renderedEvents.length - visibleEvents.length, 0);
   const showLiveStream = !replayMode && (sending || renderedEvents.length > 0);
+  const latestAgentRuntime = getLatestAgentRuntime(messages);
+  const displayAgentRuntime =
+    agentConfig?.runtime
+    ?? agentContext
+    ?? latestAgentRuntime
+    ?? (codexThreadId ? { thread_id: codexThreadId } : null);
+  const selectedModel =
+    agentConfig?.selected.model
+    ?? displayAgentRuntime?.model
+    ?? "";
+  const selectedReasoningEffort =
+    agentConfig?.selected.reasoning_effort
+    ?? displayAgentRuntime?.reasoning_effort
+    ?? "";
+  const selectedApprovalPolicy =
+    agentConfig?.selected.approval_policy
+    ?? displayAgentRuntime?.approval_policy
+    ?? "";
+  const selectedSandboxMode =
+    agentConfig?.selected.sandbox_mode
+    ?? displayAgentRuntime?.sandbox_mode
+    ?? "";
+  const selectedBranch =
+    agentConfig?.selected.branch
+    ?? displayAgentRuntime?.branch
+    ?? "";
+  const modelOptions = agentConfig?.options.models ?? (selectedModel ? [selectedModel] : []);
+  const reasoningOptions = agentConfig?.options.reasoning_efforts ?? [];
+  const approvalOptions =
+    agentConfig?.options.approval_policies
+    ?? (selectedApprovalPolicy ? [selectedApprovalPolicy] : []);
+  const sandboxOptions = agentConfig?.options.sandbox_modes ?? [];
+  const branchOptions = agentConfig?.options.branches ?? (selectedBranch ? [selectedBranch] : []);
+  const modelValue = selectedModel || modelOptions[0] || "";
+  const reasoningValue = selectedReasoningEffort || reasoningOptions[0] || "";
+  const approvalValue = selectedApprovalPolicy || approvalOptions[0] || "";
+  const sandboxValue = selectedSandboxMode || sandboxOptions[0] || "";
+  const branchValue = selectedBranch || branchOptions[0] || "";
 
   useEffect(() => {
     if (!token && !hasStoredAuthSession()) {
@@ -438,6 +786,8 @@ export function SessionPage() {
     }
 
     void loadSession();
+    void loadAgentContext();
+    void loadAgentConfig();
     void loadMessages();
     void loadTodos();
   }, [sessionId, token, navigate]);
@@ -459,6 +809,8 @@ export function SessionPage() {
 
           if (isAgentSender(message.sender)) {
             setStreamEvents([]);
+            void loadAgentContext();
+            void loadAgentConfig();
           }
         },
         onStatusChanged(status: string) {
@@ -543,6 +895,42 @@ export function SessionPage() {
         return;
       }
       setError(err.message || "加载会话失败");
+    }
+  };
+
+  const loadAgentContext = async () => {
+    try {
+      const response = await getSessionAgentContext(token!, sessionId!);
+      setAgentContext(response.data);
+    } catch {
+      // keep the page usable even if runtime details cannot be fetched yet
+    }
+  };
+
+  const loadAgentConfig = async () => {
+    try {
+      const response = await getSessionAgentConfig(token!, sessionId!);
+      setAgentConfig(response.data);
+      setAgentConfigError(null);
+    } catch {
+      // keep the page usable even if agent settings cannot be fetched yet
+    }
+  };
+
+  const handleAgentConfigChange = async (
+    patch: Partial<AgentSessionConfig>,
+    savingKey: string,
+  ) => {
+    try {
+      setAgentConfigSaving(savingKey);
+      setAgentConfigError(null);
+      const response = await updateSessionAgentConfig(token!, sessionId!, patch);
+      setAgentConfig(response.data);
+      await loadAgentContext();
+    } catch (err: any) {
+      setAgentConfigError(err.message || "更新 Codex 配置失败");
+    } finally {
+      setAgentConfigSaving(null);
     }
   };
 
@@ -729,13 +1117,138 @@ export function SessionPage() {
             <div className="session-topbar__meta">
               <span className="session-topbar__meta-item">
                 线程 ID
-                <code>{codexThreadId ?? "等待首次同步"}</code>
+                <code>{displayAgentRuntime?.thread_id ?? codexThreadId ?? "等待首次同步"}</code>
               </span>
               <span className="session-topbar__meta-item">
                 更新时间
                 <strong>{session ? formatDateTime(session.updated_at) : "-"}</strong>
               </span>
             </div>
+            <div className="session-settings-row">
+              <label className="session-setting-inline">
+                <span className="session-setting-inline__label">模型</span>
+                <select
+                  className="session-setting-inline__control"
+                  value={modelValue}
+                  disabled={agentConfigSaving !== null || modelOptions.length === 0}
+                  onChange={(event) => void handleAgentConfigChange(
+                    { model: event.target.value },
+                    "model",
+                  )}
+                >
+                  {modelOptions.length === 0 ? (
+                    <option value="">暂无模型</option>
+                  ) : (
+                    modelOptions.map((model) => (
+                      <option key={model} value={model}>{model}</option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <label className="session-setting-inline">
+                <span className="session-setting-inline__label">思考</span>
+                <select
+                  className="session-setting-inline__control"
+                  value={reasoningValue}
+                  disabled={agentConfigSaving !== null || reasoningOptions.length === 0}
+                  onChange={(event) => void handleAgentConfigChange(
+                    { reasoning_effort: event.target.value },
+                    "reasoning",
+                  )}
+                >
+                  {reasoningOptions.length === 0 ? (
+                    <option value="">暂无思考强度</option>
+                  ) : (
+                    reasoningOptions.map((effort) => (
+                      <option key={effort} value={effort}>
+                        {formatReasoningEffort(effort)}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <label className="session-setting-inline">
+                <span className="session-setting-inline__label">审批</span>
+                <select
+                  className="session-setting-inline__control"
+                  value={approvalValue}
+                  disabled={agentConfigSaving !== null || approvalOptions.length === 0}
+                  onChange={(event) => void handleAgentConfigChange(
+                    { approval_policy: event.target.value },
+                    "approval",
+                  )}
+                >
+                  {approvalOptions.length === 0 ? (
+                    <option value="">暂无审批策略</option>
+                  ) : (
+                    approvalOptions.map((policy) => (
+                      <option key={policy} value={policy}>
+                        {formatApprovalPolicy(policy)}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <label className="session-setting-inline">
+                <span className="session-setting-inline__label">沙箱</span>
+                <select
+                  className="session-setting-inline__control"
+                  value={sandboxValue}
+                  disabled={agentConfigSaving !== null || sandboxOptions.length === 0}
+                  onChange={(event) => void handleAgentConfigChange(
+                    { sandbox_mode: event.target.value },
+                    "sandbox",
+                  )}
+                >
+                  {sandboxOptions.length === 0 ? (
+                    <option value="">暂无沙箱模式</option>
+                  ) : (
+                    sandboxOptions.map((mode) => (
+                      <option key={mode} value={mode}>
+                        {formatSandboxMode(mode)}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <label className="session-setting-inline">
+                <span className="session-setting-inline__label">分支</span>
+                <select
+                  className="session-setting-inline__control"
+                  value={branchValue}
+                  disabled={agentConfigSaving !== null || branchOptions.length === 0}
+                  onChange={(event) => void handleAgentConfigChange(
+                    { branch: event.target.value },
+                    "branch",
+                  )}
+                >
+                  {branchOptions.length === 0 ? (
+                    <option value="">暂无分支</option>
+                  ) : (
+                    branchOptions.map((branch) => (
+                      <option key={branch} value={branch}>{branch}</option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <div className="session-setting-inline session-setting-inline--path">
+                <span className="session-setting-inline__label">工作目录</span>
+                <code className="session-setting-inline__code">
+                  {displayAgentRuntime?.working_directory ?? "项目未配置工作目录"}
+                </code>
+              </div>
+            </div>
+            <div className="session-settings-hint">
+              <span>{displayAgentRuntime?.model_provider ?? "Provider 未知"}</span>
+              <span>CLI {displayAgentRuntime?.cli_version ?? "-"}</span>
+              <span>运行时审批 {formatApprovalPolicy(displayAgentRuntime?.approval_policy)}</span>
+              <span>网络 {formatNetworkAccess(displayAgentRuntime?.network_access)}</span>
+              <span>Source: {displayAgentRuntime?.source ?? "-"}</span>
+              {agentConfigSaving && <span>保存中...</span>}
+            </div>
+            {agentConfigError && (
+              <div className="session-inline-error">{agentConfigError}</div>
+            )}
           </div>
           <div className="session-topbar__actions">
             <button
@@ -781,6 +1294,12 @@ export function SessionPage() {
                   {displayMessages.map((message) => {
                     const presenter = getMessagePresenter(message);
                     const isHighlighted = highlightedMessageId === message.id;
+                    const metadata = parseAgentMetadata(message.metadata);
+                    const commands = metadata?.execution_trace?.commands ?? [];
+                    const files = metadata?.execution_trace?.files ?? [];
+                    const diffs = metadata?.execution_trace?.file_diffs ?? [];
+                    const usage = metadata?.usage;
+                    const usageSummary = formatUsageSummary(usage);
 
                     return (
                       <article
@@ -797,8 +1316,9 @@ export function SessionPage() {
                         <div className={`session-message-avatar session-message-avatar--${presenter.tone}`}>
                           {presenter.avatarText}
                         </div>
-                        <div className={`session-message-card session-message-card--${presenter.tone}`}>
-                          <div className="session-message-card__top">
+                        <div className="session-message-content">
+                          <div className={`session-message-card session-message-card--${presenter.tone}`}>
+                            <div className="session-message-card__top">
                             <div>
                               <div className="session-message-card__author">{presenter.label}</div>
                             </div>
@@ -806,6 +1326,100 @@ export function SessionPage() {
                               {formatClock(message.created_at)}
                             </time>
                           </div>
+                          {hasExecutionDetails(metadata) && (
+                            <div className="session-execution">
+                              {commands.length > 0 && (
+                                <div className="session-execution__section">
+                                  <div className="session-command-list">
+                                    {commands.map((command, index) => {
+                                      const duration = formatDuration(command.duration_ms);
+                                      return (
+                                        <details
+                                          key={`${message.id}-command-${index}`}
+                                          className="session-command-card"
+                                        >
+                                          <summary className="session-command-card__summary">
+                                            <code className="session-command-card__command">{command.command}</code>
+                                            <div className="session-command-card__badges">
+                                              <span className={`session-command-badge ${command.exit_code === 0 ? "session-command-badge--success" : command.exit_code != null ? "session-command-badge--danger" : ""}`}>
+                                                {formatCommandStatus(command.status)}
+                                              </span>
+                                              {command.exit_code != null && (
+                                                <span className="session-command-badge">退出 {command.exit_code}</span>
+                                              )}
+                                              {duration && (
+                                                <span className="session-command-badge">{duration}</span>
+                                              )}
+                                              <span className="session-command-card__toggle" aria-hidden="true" />
+                                            </div>
+                                          </summary>
+                                          <div className="session-command-card__details">
+                                            {command.cwd && (
+                                              <div className="session-command-card__cwd">
+                                                <span>工作目录</span>
+                                                <code>{command.cwd}</code>
+                                              </div>
+                                            )}
+                                            {command.output ? (
+                                              <pre className="session-command-output">{command.output}</pre>
+                                            ) : (
+                                              <div className="session-execution__empty">未采集到命令输出。</div>
+                                            )}
+                                          </div>
+                                        </details>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              )}
+
+                              {files.length > 0 && (
+                                <div className="session-execution__section">
+                                  <div className="session-execution__title">改动文件</div>
+                                  <div className="session-file-list">
+                                    {files.map((file) => (
+                                      <div
+                                        key={`${message.id}-${file.path}-${file.kind}`}
+                                        className={`session-file-chip session-file-chip--${file.kind}`}
+                                      >
+                                        <span className="session-file-chip__kind">{formatFileKind(file.kind)}</span>
+                                        <code>{file.path}</code>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {diffs.length > 0 && (
+                                <div className="session-execution__section">
+                                  <div className="session-execution__title">改动点 Diff</div>
+                                  <div className="session-diff-list">
+                                    {diffs.map((diff, index) => (
+                                      <div key={`${message.id}-diff-${index}`} className="session-diff-card">
+                                        <div className="session-diff-card__header">
+                                          <code>{diff.path}</code>
+                                          <span className={`session-file-chip session-file-chip--${diff.kind}`}>
+                                            <span className="session-file-chip__kind">{formatFileKind(diff.kind)}</span>
+                                          </span>
+                                        </div>
+                                        <div className="session-diff-pre">
+                                          {diff.patch.split(/\r?\n/u).map((line, lineIndex) => (
+                                            <div
+                                              key={`${message.id}-diff-${index}-line-${lineIndex}`}
+                                              className={getDiffLineClass(line)}
+                                            >
+                                              {line || " "}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                            </div>
+                          )}
 
                           <div className="session-message-card__body">{message.content}</div>
 
@@ -857,6 +1471,10 @@ export function SessionPage() {
                                 </button>
                               </div>
                             </div>
+                          )}
+                          </div>
+                          {usageSummary && presenter.tone === "agent" && (
+                            <div className="session-message-row__hover-meta">{usageSummary}</div>
                           )}
                         </div>
                       </article>
