@@ -2,10 +2,13 @@
 
 > 把原本只存在于个人终端里的 AI 编程过程，变成团队可共享、可协作、可沉淀的项目资产。
 
+> SyncAI is a collaborative AI coding workspace for small teams. It turns local, personal AI sessions into shared project assets with real-time visibility, searchable history, replayable execution context, and lightweight collaboration around the same agent workflow.
+
 ![Node.js >= 24](https://img.shields.io/badge/Node.js-%3E%3D24-43853D?logo=node.js&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)
 ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=0B1220)
 ![Fastify](https://img.shields.io/badge/Fastify-5.x-000000?logo=fastify&logoColor=white)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 SyncAI 是一个面向小团队的 AI 编程协作与共享平台。它不试图重做 Codex 或 Claude Code，而是在现有 Agent 能力之上，补上团队协作层：共享会话、实时可见、过程沉淀、搜索回放，以及围绕会话上下文的轻量协作。
 
