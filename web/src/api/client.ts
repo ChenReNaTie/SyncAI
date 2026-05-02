@@ -686,13 +686,18 @@ export function getTeamMembers(
 }
 
 export interface SearchMessageItem {
-  message_id: string;
+  result_type: "message" | "event";
+  message_id: string | null;
+  event_id: string | null;
+  sender_type: "member" | "agent" | null;
+  event_type: string | null;
+  preview: string;
   content: string;
-  sender: string;
   session_id: string;
   session_title: string;
   project_id: string;
   project_name: string;
+  occurred_at: string;
   created_at: string;
 }
 

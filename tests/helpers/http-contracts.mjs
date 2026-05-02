@@ -21,6 +21,10 @@ export function assertUuid(value) {
   assert.match(value, uuidPattern);
 }
 
+function isUuid(value) {
+  return typeof value === "string" && uuidPattern.test(value);
+}
+
 export function assertIsoTimestamp(value) {
   assert.equal(typeof value, "string");
   assert.ok(!Number.isNaN(Date.parse(value)));
@@ -165,7 +169,9 @@ export function assertCursorEnvelope(payload, expectedLength) {
   assertStrictKeys(payload, ["data", "meta"]);
   assert.ok(Array.isArray(payload.data));
   assert.equal(payload.data.length, expectedLength);
-  assertStrictKeys(payload.meta, ["next_cursor"]);
+  assert.equal(typeof payload.meta, "object");
+  assert.ok(payload.meta !== null);
+  assert.ok("next_cursor" in payload.meta);
 
   if (payload.meta.next_cursor !== null) {
     assert.equal(typeof payload.meta.next_cursor, "string");
@@ -263,19 +269,35 @@ export function assertMessageContract(message, expected = {}) {
 
 export function assertSearchResultContract(result, expected = {}) {
   assertStrictKeys(result, [
+    "result_type",
     "session_id",
+    "session_title",
     "project_id",
+    "project_name",
     "message_id",
+    "event_id",
     "sender_type",
-    "snippet",
+    "event_type",
+    "preview",
+    "content",
     "occurred_at",
+    "created_at",
   ]);
+  assert.ok(["message", "event"].includes(result.result_type));
   assertUuid(result.session_id);
+  assert.equal(typeof result.session_title, "string");
   assertUuid(result.project_id);
-  assertUuid(result.message_id);
-  assert.ok(["member", "agent"].includes(result.sender_type));
-  assert.equal(typeof result.snippet, "string");
+  assert.equal(typeof result.project_name, "string");
+  assert.ok(result.message_id === null || isUuid(result.message_id));
+  assert.ok(result.event_id === null || isUuid(result.event_id));
+  assert.ok(
+    result.sender_type === null || ["member", "agent"].includes(result.sender_type),
+  );
+  assert.ok(result.event_type === null || typeof result.event_type === "string");
+  assert.equal(typeof result.preview, "string");
+  assert.equal(typeof result.content, "string");
   assertIsoTimestamp(result.occurred_at);
+  assertIsoTimestamp(result.created_at);
   assertExpectedFields(result, expected);
 }
 

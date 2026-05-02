@@ -85,7 +85,7 @@ const sessionCursorSchema = z.object({
 
 const searchCursorSchema = z.object({
   occurred_at: z.string().datetime({ offset: true }),
-  message_id: z.string().uuid(),
+  result_id: z.string().uuid(),
   team_id: z.string().uuid(),
   actor_user_id: z.string().uuid(),
   project_id: optionalCursorProjectIdSchema,
@@ -1868,46 +1868,95 @@ ${buildMessageSelectColumns("m", "u")}
       actorUserId,
       query.data.project_id ?? null,
       query.data.q,
+      cursor?.occurred_at ?? null,
+      cursor?.result_id ?? null,
+      query.data.limit + 1,
     ];
-    const filters = [
-      "p.team_id = $1",
-      "p.archived_at IS NULL",
-      "s.archived_at IS NULL",
-      "($3::uuid IS NULL OR s.project_id = $3)",
-      "(s.visibility = 'shared' OR s.creator_id = $2)",
-      "m.search_vector @@ plainto_tsquery('simple', $4)",
-    ];
-
-    if (cursor) {
-      values.push(cursor.occurred_at);
-      const cursorOccurredIndex = values.length;
-      values.push(cursor.message_id);
-      const cursorMessageIndex = values.length;
-      filters.push(
-        `(m.created_at < $${cursorOccurredIndex}::timestamptz
-          OR (
-            m.created_at = $${cursorOccurredIndex}::timestamptz
-            AND m.id < $${cursorMessageIndex}::uuid
-          ))`,
-      );
-    }
-
-    values.push(query.data.limit + 1);
 
     const result = await app.db.query(
-      `SELECT
-         m.id AS message_id,
-         m.session_id,
-         s.project_id,
-         m.sender_type,
-         m.content,
-         m.created_at
-       FROM messages m
-       JOIN sessions s ON s.id = m.session_id
-       JOIN projects p ON p.id = s.project_id
-       WHERE ${filters.join(" AND ")}
-       ORDER BY m.created_at DESC, m.id DESC
-       LIMIT $${values.length}`,
+      `WITH searchable_results AS (
+         SELECT
+           'message'::text AS result_type,
+           m.id AS result_id,
+           m.id AS message_id,
+           NULL::uuid AS event_id,
+           m.sender_type::text AS sender_type,
+           NULL::text AS event_type,
+           m.session_id,
+           s.title AS session_title,
+           s.project_id,
+           p.name AS project_name,
+           left(m.content, 240) AS preview,
+           m.created_at AS occurred_at
+         FROM messages m
+         JOIN sessions s ON s.id = m.session_id
+         JOIN projects p ON p.id = s.project_id
+         WHERE p.team_id = $1
+           AND p.archived_at IS NULL
+           AND s.archived_at IS NULL
+           AND ($3::uuid IS NULL OR s.project_id = $3)
+           AND (s.visibility = 'shared' OR s.creator_id = $2)
+           AND m.search_vector @@ plainto_tsquery('simple', $4)
+
+         UNION ALL
+
+         SELECT
+           'event'::text AS result_type,
+           e.id AS result_id,
+           e.related_message_id AS message_id,
+           e.id AS event_id,
+           NULL::text AS sender_type,
+           e.event_type::text AS event_type,
+           e.session_id,
+           s.title AS session_title,
+           s.project_id,
+           p.name AS project_name,
+           left(e.summary, 240) AS preview,
+           e.occurred_at AS occurred_at
+         FROM session_events e
+         JOIN sessions s ON s.id = e.session_id
+         JOIN projects p ON p.id = s.project_id
+         WHERE p.team_id = $1
+           AND p.archived_at IS NULL
+           AND s.archived_at IS NULL
+           AND ($3::uuid IS NULL OR s.project_id = $3)
+           AND (s.visibility = 'shared' OR s.creator_id = $2)
+           AND e.event_type IN (
+             'command.summary',
+             'status.changed',
+             'session.shared',
+             'session.privatized',
+             'message.failed',
+             'message.queued'
+           )
+           AND (
+             to_tsvector('simple', coalesce(e.summary, ''))
+               @@ plainto_tsquery('simple', $4)
+             OR to_tsvector('simple', coalesce(e.payload::text, ''))
+               @@ plainto_tsquery('simple', $4)
+           )
+       ),
+       filtered_results AS (
+         SELECT *
+         FROM searchable_results
+       ),
+       paged_results AS (
+         SELECT
+           *,
+           (SELECT count(*)::int FROM filtered_results) AS total_count
+         FROM filtered_results
+         WHERE $5::timestamptz IS NULL
+           OR occurred_at < $5::timestamptz
+           OR (
+             occurred_at = $5::timestamptz
+             AND result_id < $6::uuid
+           )
+         ORDER BY occurred_at DESC, result_id DESC
+         LIMIT $7
+       )
+       SELECT *
+       FROM paged_results
+       ORDER BY occurred_at DESC, result_id DESC`,
       values,
     );
 
@@ -1917,26 +1966,41 @@ ${buildMessageSelectColumns("m", "u")}
       : result.rows;
     const nextCursor = hasMore
       ? encodeCursor({
-          occurred_at: asIso(pageRows.at(-1)?.created_at) ?? "",
-          message_id: String(pageRows.at(-1)?.message_id ?? ""),
+          occurred_at: asIso(pageRows.at(-1)?.occurred_at) ?? "",
+          result_id: String(pageRows.at(-1)?.result_id ?? ""),
           team_id: params.data.teamId,
           actor_user_id: actorUserId,
           project_id: toCursorScopeValue(query.data.project_id),
           q: query.data.q,
         })
       : null;
+    const total = pageRows.length > 0
+      ? Number(pageRows[0]?.total_count ?? 0)
+      : 0;
 
-    return buildCursorResponse(
-      pageRows.map((row) => ({
+    return {
+      data: pageRows.map((row) => ({
+        result_type: row.result_type,
         session_id: row.session_id,
+        session_title: row.session_title,
         project_id: row.project_id,
+        project_name: row.project_name,
         message_id: row.message_id,
+        event_id: row.event_id,
         sender_type: row.sender_type,
-        snippet: String(row.content).slice(0, 200),
-        occurred_at: asIso(row.created_at),
+        event_type: row.event_type,
+        preview: row.preview,
+        content: row.preview,
+        occurred_at: asIso(row.occurred_at),
+        created_at: asIso(row.occurred_at),
       })),
-      nextCursor,
-    );
+      meta: {
+        query: query.data.q,
+        team_id: params.data.teamId,
+        total,
+        next_cursor: nextCursor,
+      },
+    };
   });
 
   app.get("/sessions/:sessionId/todos", async (request, reply) => {

@@ -157,12 +157,15 @@ test(`${group.id} filters out private sessions and non-searchable records while 
       const firstPagePayload = firstPage.json();
       assertCursorEnvelope(firstPagePayload, 1);
       assertSearchResultContract(firstPagePayload.data[0], {
+        result_type: "message",
         session_id: context.sessionId,
         project_id: context.projectId,
         message_id: secondSharedMessageId,
         sender_type: "agent",
-        snippet: "queue-alpha final reply is searchable",
+        preview: "queue-alpha final reply is searchable",
+        content: "queue-alpha final reply is searchable",
         occurred_at: "2026-04-21T01:02:00.000Z",
+        created_at: "2026-04-21T01:02:00.000Z",
       });
       assert.ok(firstPagePayload.meta.next_cursor);
       assert.ok(!("next_cursor" in firstPagePayload));
@@ -218,12 +221,15 @@ test(`${group.id} filters out private sessions and non-searchable records while 
       const secondPagePayload = secondPage.json();
       assertCursorEnvelope(secondPagePayload, 1);
       assertSearchResultContract(secondPagePayload.data[0], {
+        result_type: "message",
         session_id: context.sessionId,
         project_id: context.projectId,
         message_id: firstSharedMessageId,
         sender_type: "member",
-        snippet: "queue-alpha visible member message",
+        preview: "queue-alpha visible member message",
+        content: "queue-alpha visible member message",
         occurred_at: "2026-04-21T01:00:00.000Z",
+        created_at: "2026-04-21T01:00:00.000Z",
       });
       assert.equal(secondPagePayload.meta.next_cursor, null);
 
@@ -236,6 +242,68 @@ test(`${group.id} filters out private sessions and non-searchable records while 
         firstSharedMessageId,
       ]);
       assert.ok(!collectedIds.includes(ignoredIntermediateId));
+    });
+  } finally {
+    await cleanupPersistedSessionContext(context);
+  }
+});
+
+test(`${group.id} includes searchable session event summaries in search results`, async () => {
+  const context = await createPersistedSessionContext();
+
+  try {
+    const eventResult = await getPool().query(
+      `INSERT INTO session_events (
+         session_id,
+         related_message_id,
+         event_type,
+         summary,
+         payload,
+         occurred_at
+       )
+       VALUES (
+         $1,
+         NULL,
+         'command.summary',
+         $2,
+         '{"command":"npm run build"}'::jsonb,
+         $3
+       )
+       RETURNING id`,
+      [
+        context.sessionId,
+        "build command completed with warnings",
+        new Date("2026-04-21T01:30:00.000Z"),
+      ],
+    );
+
+    await withInjectedApp(async (app) => {
+      const response = await app.inject({
+        method: "GET",
+        url: `/api/v1/teams/${context.teamId}/search?q=build command`,
+        headers: {
+          "x-syncai-user-id": context.memberId,
+        },
+      });
+
+      assert.equal(response.statusCode, 200);
+      const payload = response.json();
+      assertCursorEnvelope(payload, 1);
+      assertSearchResultContract(payload.data[0], {
+        result_type: "event",
+        session_id: context.sessionId,
+        project_id: context.projectId,
+        message_id: null,
+        event_id: eventResult.rows[0].id,
+        sender_type: null,
+        event_type: "command.summary",
+        preview: "build command completed with warnings",
+        content: "build command completed with warnings",
+        occurred_at: "2026-04-21T01:30:00.000Z",
+        created_at: "2026-04-21T01:30:00.000Z",
+      });
+      assert.equal(payload.meta.total, 1);
+      assert.equal(payload.meta.next_cursor, null);
     });
   } finally {
     await cleanupPersistedSessionContext(context);
@@ -267,10 +335,12 @@ test(`${group.id} drops shared-session search results after the owner privatizes
       const beforePatchPayload = beforePatch.json();
       assertCursorEnvelope(beforePatchPayload, 1);
       assertSearchResultContract(beforePatchPayload.data[0], {
+        result_type: "message",
         session_id: context.sessionId,
         project_id: context.projectId,
         sender_type: "member",
-        snippet: "scope-switch-keyword",
+        preview: "scope-switch-keyword",
+        content: "scope-switch-keyword",
       });
       assert.equal(beforePatchPayload.meta.next_cursor, null);
 
@@ -331,12 +401,15 @@ test(`${group.id} excludes archived-project sessions from search results`, async
       const beforeArchivePayload = beforeArchive.json();
       assertCursorEnvelope(beforeArchivePayload, 1);
       assertSearchResultContract(beforeArchivePayload.data[0], {
+        result_type: "message",
         session_id: context.sessionId,
         project_id: context.projectId,
         message_id: searchableMessageId,
         sender_type: "member",
-        snippet: "archive-search-keyword",
+        preview: "archive-search-keyword",
+        content: "archive-search-keyword",
         occurred_at: "2026-04-21T03:00:00.000Z",
+        created_at: "2026-04-21T03:00:00.000Z",
       });
       assert.equal(beforeArchivePayload.meta.next_cursor, null);
 
