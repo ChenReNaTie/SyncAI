@@ -6,6 +6,7 @@ import {
   createMockAgentAdapter,
   type MockAgentAdapter,
   type MockAgentResult,
+  type ResolveApprovalInput,
   type SendMessageInput,
   type StartSessionInput,
   type StreamEvent,
@@ -67,6 +68,7 @@ export interface WorkspaceRuntime {
     input: StartSessionInput,
   ): Promise<{ agentSessionRef: string }>;
   scheduleSession(sessionId: string): void;
+  resolveApproval(input: ResolveApprovalInput): Promise<boolean>;
   waitForSession(sessionId: string): Promise<void>;
   close(): Promise<void>;
   on(event: string, listener: (...args: any[]) => void): this;
@@ -579,6 +581,10 @@ export function createWorkspaceRuntime(options: {
         });
 
       activeSessions.set(sessionId, task);
+    },
+
+    async resolveApproval(input: ResolveApprovalInput) {
+      return await adapter.resolveApproval(input);
     },
 
     async waitForSession(sessionId: string) {

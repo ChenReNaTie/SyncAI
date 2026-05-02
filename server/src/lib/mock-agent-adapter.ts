@@ -61,11 +61,20 @@ export interface StreamEvent {
   data: Record<string, unknown>;
 }
 
+export type ApprovalDecision = "accept" | "decline";
+
+export interface ResolveApprovalInput {
+  sessionId: string;
+  requestId: string;
+  decision: ApprovalDecision;
+}
+
 export interface MockAgentAdapter {
   startSession(input: StartSessionInput): Promise<{ agentSessionRef: string }>;
   sendMessage(
     input: SendMessageInput,
   ): AsyncGenerator<StreamEvent, MockAgentResult, void>;
+  resolveApproval(input: ResolveApprovalInput): Promise<boolean> | boolean;
 }
 
 export function createMockAgentAdapter(options: {
@@ -213,6 +222,10 @@ export function createMockAgentAdapter(options: {
           },
         },
       };
+    },
+
+    resolveApproval() {
+      return false;
     },
   };
 }

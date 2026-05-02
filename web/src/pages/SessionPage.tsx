@@ -85,6 +85,19 @@ interface PageLocationState {
   backTo?: BackTarget;
 }
 
+interface PendingApprovalRequest {
+  request_id: string;
+  kind: "command" | "file" | "permissions";
+  thread_id?: string;
+  turn_id?: string;
+  item_id?: string;
+  command?: string;
+  cwd?: string;
+  reason?: string;
+  changes?: AgentFileTrace[];
+  permissions?: Record<string, unknown>;
+}
+
 let eventSequence = 0;
 
 function resolveDisplayedCodexThreadId(session: SessionDetail | null) {
@@ -309,14 +322,25 @@ function renderItemRow(
       return { id: rowId, icon: "答", text, tone: "neutral", spinning: false };
     }
 
-    case "reasoning":
+    case "reasoning": {
+      const text = String(item.text ?? "").trim();
+      if (!text) {
+        return {
+          id: rowId,
+          icon: "˼",
+          text: phase === "completed" ? "思考完成" : "正在思考...",
+          tone: "neutral",
+          spinning: phase !== "completed",
+        };
+      }
       return {
         id: rowId,
-        icon: "思",
-        text: String(item.text ?? "").slice(0, 220),
+        icon: "˼",
+        text: text.slice(0, 220),
         tone: "neutral",
         spinning,
       };
+    }
 
     case "file_change": {
       const changes = item.changes as Array<{ path: string; kind: string }> | undefined;
@@ -645,6 +669,19 @@ function formatFileKind(kind: AgentFileTrace["kind"]) {
   }
 }
 
+function formatApprovalKind(kind: PendingApprovalRequest["kind"]) {
+  switch (kind) {
+    case "command":
+      return "命令执行审批";
+    case "file":
+      return "文件改动审批";
+    case "permissions":
+      return "权限提升审批";
+    default:
+      return kind;
+  }
+}
+
 function getDiffLineClass(line: string) {
   if (line.startsWith("@@")) {
     return "session-diff-line session-diff-line--hunk";
@@ -716,6 +753,9 @@ export function SessionPage() {
 
   const [streamEvents, setStreamEvents] = useState<CodexStreamEvent[]>([]);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<PendingApprovalRequest | null>(null);
+  const [approvalSubmitting, setApprovalSubmitting] = useState<"accept" | "decline" | null>(null);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
 
   const token = getStoredAuthToken();
   const locationState = location.state as PageLocationState | null;
@@ -809,6 +849,9 @@ export function SessionPage() {
 
           if (isAgentSender(message.sender)) {
             setStreamEvents([]);
+            setPendingApproval(null);
+            setApprovalSubmitting(null);
+            setApprovalError(null);
             void loadAgentContext();
             void loadAgentConfig();
           }
@@ -817,6 +860,49 @@ export function SessionPage() {
           setSession((previous) => (previous ? { ...previous, runtime_status: status } : previous));
         },
         onStreamEvent(event: CodexStreamEvent) {
+          if (event.type === "approval.requested") {
+            const data = event.data as Record<string, unknown>;
+            setPendingApproval({
+              request_id: String(data.request_id ?? ""),
+              kind: String(data.kind ?? "command") as PendingApprovalRequest["kind"],
+              ...(typeof data.thread_id === "string" ? { thread_id: data.thread_id } : {}),
+              ...(typeof data.turn_id === "string" ? { turn_id: data.turn_id } : {}),
+              ...(typeof data.item_id === "string" ? { item_id: data.item_id } : {}),
+              ...(typeof data.command === "string" ? { command: data.command } : {}),
+              ...(typeof data.cwd === "string" ? { cwd: data.cwd } : {}),
+              ...(typeof data.reason === "string" ? { reason: data.reason } : {}),
+              ...(Array.isArray(data.changes)
+                ? {
+                    changes: data.changes
+                      .filter((change): change is AgentFileTrace => (
+                        isRecord(change)
+                        && typeof change.path === "string"
+                        && typeof change.kind === "string"
+                        && ["add", "delete", "update"].includes(change.kind)
+                      ))
+                      .map((change) => ({
+                        path: change.path,
+                        kind: change.kind as AgentFileTrace["kind"],
+                      })),
+                  }
+                : {}),
+              ...(isRecord(data.permissions)
+                ? { permissions: data.permissions }
+                : {}),
+            });
+            setApprovalSubmitting(null);
+            setApprovalError(null);
+          }
+
+          if (event.type === "approval.resolved") {
+            const requestId = String((event.data as Record<string, unknown>).request_id ?? "");
+            setPendingApproval((previous) => (
+              previous?.request_id === requestId ? null : previous
+            ));
+            setApprovalSubmitting(null);
+            setApprovalError(null);
+          }
+
           if (
             event.type === "thread.started"
             && event.data
@@ -833,15 +919,15 @@ export function SessionPage() {
             if (event.type === "item.updated" || event.type === "item.completed") {
               const eventData = event.data as Record<string, unknown>;
               const item = eventData.item as Record<string, unknown> | undefined;
-              if (item?.type === "agent_message") {
+              if (item?.type === "agent_message" || item?.type === "reasoning") {
                 const itemId = item.id;
                 const filtered = previous.filter((existing) => {
                   const existingData = existing.data as Record<string, unknown>;
                   const existingItem = existingData.item as Record<string, unknown> | undefined;
-                  if (existingItem?.type !== "agent_message") {
+                  if (existingItem?.type !== item.type) {
                     return true;
                   }
-                  return existingItem?.id === itemId;
+                  return existingItem?.id !== itemId;
                 });
                 return [...filtered, event];
               }
@@ -849,6 +935,10 @@ export function SessionPage() {
 
             return [...previous, event];
           });
+        },
+        onApprovalError(event) {
+          setApprovalSubmitting(null);
+          setApprovalError(event.message);
         },
       },
       sessionId,
@@ -975,6 +1065,9 @@ export function SessionPage() {
       setSending(true);
       setSendError(null);
       setStreamEvents([]);
+      setPendingApproval(null);
+      setApprovalSubmitting(null);
+      setApprovalError(null);
       const response = await sendMessage(token!, sessionId!, trimmed);
       setMessages((previous) => (
         previous.some((message) => message.id === response.data.message.id)
@@ -987,6 +1080,25 @@ export function SessionPage() {
     } finally {
       setSending(false);
     }
+  };
+
+  const handleApprovalDecision = (decision: "accept" | "decline") => {
+    if (!sessionId || !pendingApproval) {
+      return;
+    }
+
+    if (!socketRef.current) {
+      setApprovalError("审批连接不可用，请稍后重试。");
+      return;
+    }
+
+    setApprovalSubmitting(decision);
+    setApprovalError(null);
+    socketRef.current.respondToApproval(
+      sessionId,
+      pendingApproval.request_id,
+      decision,
+    );
   };
 
   const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1239,11 +1351,11 @@ export function SessionPage() {
               </div>
             </div>
             <div className="session-settings-hint">
-              <span>{displayAgentRuntime?.model_provider ?? "Provider 未知"}</span>
+              <span>提供方 {displayAgentRuntime?.model_provider ?? "未知"}</span>
               <span>CLI {displayAgentRuntime?.cli_version ?? "-"}</span>
               <span>运行时审批 {formatApprovalPolicy(displayAgentRuntime?.approval_policy)}</span>
               <span>网络 {formatNetworkAccess(displayAgentRuntime?.network_access)}</span>
-              <span>Source: {displayAgentRuntime?.source ?? "-"}</span>
+              <span>来源 {displayAgentRuntime?.source ?? "-"}</span>
               {agentConfigSaving && <span>保存中...</span>}
             </div>
             {agentConfigError && (
@@ -1635,6 +1747,82 @@ export function SessionPage() {
           </aside>
         </div>
       </div>
+      {pendingApproval && (
+        <div className="session-approval-backdrop">
+          <div className="session-approval-dialog">
+            <div className="session-approval-dialog__eyebrow">需要审批</div>
+            <div className="session-approval-dialog__title">
+              {formatApprovalKind(pendingApproval.kind)}
+            </div>
+            {pendingApproval.reason && (
+              <div className="session-approval-dialog__reason">{pendingApproval.reason}</div>
+            )}
+
+            {pendingApproval.command && (
+              <div className="session-approval-dialog__block">
+                <span className="session-approval-dialog__label">命令</span>
+                <code className="session-approval-dialog__code">{pendingApproval.command}</code>
+              </div>
+            )}
+
+            {pendingApproval.cwd && (
+              <div className="session-approval-dialog__block">
+                <span className="session-approval-dialog__label">工作目录</span>
+                <code className="session-approval-dialog__code">{pendingApproval.cwd}</code>
+              </div>
+            )}
+
+            {pendingApproval.changes && pendingApproval.changes.length > 0 && (
+              <div className="session-approval-dialog__block">
+                <span className="session-approval-dialog__label">拟改动文件</span>
+                <div className="session-file-list">
+                  {pendingApproval.changes.map((file) => (
+                    <div
+                      key={`${file.path}-${file.kind}`}
+                      className={`session-file-chip session-file-chip--${file.kind}`}
+                    >
+                      <span className="session-file-chip__kind">{formatFileKind(file.kind)}</span>
+                      <code>{file.path}</code>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {pendingApproval.permissions && (
+              <div className="session-approval-dialog__block">
+                <span className="session-approval-dialog__label">权限请求</span>
+                <pre className="session-approval-dialog__json">
+                  {JSON.stringify(pendingApproval.permissions, null, 2)}
+                </pre>
+              </div>
+            )}
+
+            {approvalError && (
+              <div className="session-inline-error">{approvalError}</div>
+            )}
+
+            <div className="session-approval-dialog__actions">
+              <button
+                type="button"
+                className="session-button session-button--ghost"
+                onClick={() => handleApprovalDecision("decline")}
+                disabled={approvalSubmitting !== null}
+              >
+                {approvalSubmitting === "decline" ? "拒绝中..." : "拒绝"}
+              </button>
+              <button
+                type="button"
+                className="session-button session-button--primary"
+                onClick={() => handleApprovalDecision("accept")}
+                disabled={approvalSubmitting !== null}
+              >
+                {approvalSubmitting === "accept" ? "批准中..." : "批准"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </PageShell>
   );
 }

@@ -1,13 +1,13 @@
+﻿import { spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { delimiter, join } from "node:path";
-import { Codex } from "@openai/codex-sdk";
-import type {
-  CommandExecutionItem,
-  FileChangeItem,
-  ThreadOptions,
-  Usage,
-} from "@openai/codex-sdk";
+import {
+  buildApprovalRequest,
+  buildApprovalResponse,
+  CodexAppServerClient,
+  mapNotificationToStreamEvent,
+  type AppServerApprovalDecision,
+} from "./codex-app-server-client.js";
 import {
   buildAgentMessageMetadata,
   captureWorkspaceSnapshot,
@@ -18,19 +18,77 @@ import {
 import type {
   AgentCommandTrace,
   AgentFileTrace,
+  AgentMessageMetadataShape,
+  AgentRuntimeInfo,
   AgentUsageTrace,
 } from "./agent-execution.js";
 import type {
   MockAgentAdapter,
   MockAgentResult,
-  StreamEvent,
-  StartSessionInput,
+  ResolveApprovalInput,
   SendMessageInput,
+  StartSessionInput,
+  StreamEvent,
 } from "./mock-agent-adapter.js";
 
 interface CodexSessionState {
   threadId: string;
   workingDirectory: string;
+}
+
+interface PendingApproval {
+  resolve: (decision: AppServerApprovalDecision) => void;
+}
+
+class AsyncEventQueue<T> implements AsyncIterable<T>, AsyncIterator<T> {
+  private readonly items: T[] = [];
+  private readonly waiters: Array<(value: IteratorResult<T>) => void> = [];
+  private closed = false;
+
+  push(item: T) {
+    if (this.closed) {
+      return;
+    }
+
+    const waiter = this.waiters.shift();
+    if (waiter) {
+      waiter({ value: item, done: false });
+      return;
+    }
+
+    this.items.push(item);
+  }
+
+  close() {
+    if (this.closed) {
+      return;
+    }
+
+    this.closed = true;
+    while (this.waiters.length > 0) {
+      const waiter = this.waiters.shift();
+      waiter?.({ value: undefined as T, done: true });
+    }
+  }
+
+  async next(): Promise<IteratorResult<T>> {
+    if (this.items.length > 0) {
+      const value = this.items.shift();
+      return { value: value as T, done: false };
+    }
+
+    if (this.closed) {
+      return { value: undefined as T, done: true };
+    }
+
+    return await new Promise<IteratorResult<T>>((resolve) => {
+      this.waiters.push(resolve);
+    });
+  }
+
+  [Symbol.asyncIterator]() {
+    return this;
+  }
 }
 
 export class CodexWorkingDirectoryError extends Error {
@@ -219,46 +277,55 @@ function ensureGitBranch(workingDirectory: string, branch?: string) {
   }
 }
 
-function buildThreadOptions(input: SendMessageInput, workingDirectory: string): ThreadOptions {
-  const supportedSandboxModes = new Set(listCodexSandboxModes());
-  const supportedReasoningEfforts = new Set(listCodexReasoningEfforts(input.model));
-  const supportedApprovalPolicies = new Set(listCodexApprovalPolicies());
-  const options: ThreadOptions = {
-    workingDirectory,
-    skipGitRepoCheck: true,
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function toCommandTrace(item: Record<string, unknown>): AgentCommandTrace {
+  return {
+    command: typeof item.command === "string" ? item.command : "",
+    cwd: typeof item.cwd === "string" ? item.cwd : null,
+    output: typeof item.aggregated_output === "string" ? item.aggregated_output : null,
+    exit_code: typeof item.exit_code === "number" ? item.exit_code : null,
+    status: typeof item.status === "string" ? item.status : "completed",
+    duration_ms: typeof item.duration_ms === "number" ? item.duration_ms : null,
   };
+}
 
-  if (input.model) {
-    options.model = input.model;
+function collectFileChanges(item: Record<string, unknown>, files: Map<string, AgentFileTrace>) {
+  const changes = Array.isArray(item.changes) ? item.changes : [];
+  for (const change of changes) {
+    if (!isRecord(change) || typeof change.path !== "string" || typeof change.kind !== "string") {
+      continue;
+    }
+    files.set(change.path, {
+      path: change.path,
+      kind:
+        change.kind === "add" || change.kind === "delete" || change.kind === "update"
+          ? change.kind
+          : "update",
+    });
   }
-  if (input.sandboxMode && supportedSandboxModes.has(input.sandboxMode)) {
-    options.sandboxMode =
-      input.sandboxMode as NonNullable<ThreadOptions["sandboxMode"]>;
-  }
-  if (
-    input.modelReasoningEffort
-    && supportedReasoningEfforts.has(input.modelReasoningEffort)
-  ) {
-    options.modelReasoningEffort =
-      input.modelReasoningEffort as NonNullable<ThreadOptions["modelReasoningEffort"]>;
-  }
-  if (input.approvalPolicy && supportedApprovalPolicies.has(input.approvalPolicy)) {
-    options.approvalPolicy =
-      input.approvalPolicy as NonNullable<ThreadOptions["approvalPolicy"]>;
-  }
+}
 
-  return options;
+function buildRuntimeHint(
+  baseRuntime: AgentRuntimeInfo,
+  workingDirectory: string,
+  branch?: string | null,
+) {
+  return {
+    ...baseRuntime,
+    branch: branch ?? baseRuntime.branch ?? null,
+    working_directory: workingDirectory,
+  } satisfies AgentRuntimeInfo;
 }
 
 export function createCodexAgentAdapter(options: {
   codexPath?: string;
 } = {}): MockAgentAdapter {
   const codexPath = resolveCodexExecutablePath(options.codexPath);
-  const codex = new Codex(
-    codexPath ? { codexPathOverride: codexPath } : undefined,
-  );
-
   const sessions = new Map<string, CodexSessionState>();
+  const pendingApprovals = new Map<string, PendingApproval>();
 
   return {
     async startSession(input: StartSessionInput) {
@@ -271,7 +338,7 @@ export function createCodexAgentAdapter(options: {
         workingDirectory,
       });
 
-      return { agentSessionRef: input.sessionId };
+      return { agentSessionRef: input.sessionId }; 
     },
 
     async *sendMessage(
@@ -279,7 +346,6 @@ export function createCodexAgentAdapter(options: {
     ): AsyncGenerator<StreamEvent, MockAgentResult, void> {
       let sessionState = sessions.get(input.sessionId);
       if (!sessionState) {
-        // Lazy init: session was created before server restart or binding was lost
         const wd = requireCodexWorkingDirectory(input.workingDirectory);
         sessionState = {
           threadId:
@@ -299,111 +365,176 @@ export function createCodexAgentAdapter(options: {
       }
 
       ensureGitBranch(sessionState.workingDirectory, input.branch);
-      const threadOptions = buildThreadOptions(input, sessionState.workingDirectory);
-
-      const thread = sessionState.threadId
-        ? codex.resumeThread(sessionState.threadId, threadOptions)
-        : codex.startThread(threadOptions);
-
-      let finalResponse = "";
-      let usageTrace: AgentUsageTrace | undefined;
-      const commands = new Map<string, AgentCommandTrace>();
-      const files = new Map<string, AgentFileTrace>();
+      const supportedSandboxModes = new Set(listCodexSandboxModes());
+      const supportedReasoningEfforts = new Set(listCodexReasoningEfforts(input.model));
+      const supportedApprovalPolicies = new Set(listCodexApprovalPolicies());
       const turnStartedAt = new Date();
       const snapshot = captureWorkspaceSnapshot(sessionState.workingDirectory);
+      const queue = new AsyncEventQueue<StreamEvent>();
+      const items = new Map<string, Record<string, unknown>>();
+      const commands = new Map<string, AgentCommandTrace>();
+      const files = new Map<string, AgentFileTrace>();
+      const latestUsage = new Map<string, AgentUsageTrace>();
+      const client = new CodexAppServerClient(codexPath);
+      let finalResponse = "";
+      let usageTrace: AgentUsageTrace | undefined;
+      let runtimeHint: AgentRuntimeInfo | null = null;
+      let turnFailureMessage: string | null = null;
+      const pendingApprovalKeys: string[] = [];
 
-      const streamedTurn = await thread.runStreamed(input.content);
+      try {
+        client.onNotification = (notification) => {
+          const streamEvent = mapNotificationToStreamEvent(notification, items, latestUsage);
+          const params = isRecord(notification.params) ? notification.params : {};
 
-      for await (const event of streamedTurn.events) {
-        // Forward every SDK event to the stream
-        yield {
-          type: event.type,
-          data: event as unknown as Record<string, unknown>,
+          if (notification.method === "turn/completed") {
+            const turn = isRecord(params.turn) ? params.turn : null;
+            if (turn && typeof turn.id === "string") {
+              usageTrace = latestUsage.get(turn.id) ?? usageTrace;
+              if (turn.status === "failed") {
+                const error = isRecord(turn.error) ? turn.error : null;
+                turnFailureMessage =
+                  typeof error?.message === "string"
+                    ? error.message
+                    : "Codex turn failed.";
+              }
+            }
+          }
+
+          if (streamEvent?.data && isRecord(streamEvent.data) && isRecord(streamEvent.data.item)) {
+            const item = streamEvent.data.item as Record<string, unknown>;
+            const itemType = typeof item.type === "string" ? item.type : "";
+            if (itemType === "agent_message" && typeof item.text === "string") {
+              finalResponse = item.text;
+            }
+            if (itemType === "command_execution") {
+              commands.set(String(item.id ?? ""), toCommandTrace(item));
+            }
+            if (itemType === "file_change") {
+              collectFileChanges(item, files);
+            }
+          }
+
+          if (streamEvent) {
+            queue.push(streamEvent);
+          }
+
+          if (notification.method === "turn/completed") {
+            queue.close();
+          }
         };
 
-        // Capture the thread ID from the first thread.started event
-        if (
-          event.type === "thread.started" &&
-          !sessionState.threadId &&
-          "thread_id" in event
-        ) {
-          sessionState.threadId = String(event.thread_id);
-        }
-
-        // Accumulate the final agent response
-        if (
-          event.type === "item.completed" &&
-          "item" in event &&
-          event.item &&
-          typeof event.item === "object" &&
-          "type" in event.item &&
-          event.item.type === "agent_message" &&
-          "text" in event.item
-        ) {
-          finalResponse = String(event.item.text);
-        }
-
-        if (
-          "item" in event &&
-          event.item &&
-          typeof event.item === "object" &&
-          "type" in event.item &&
-          event.item.type === "command_execution"
-        ) {
-          const item = event.item as CommandExecutionItem;
-          commands.set(item.id, {
-            command: item.command,
-            cwd: sessionState.workingDirectory,
-            output: item.aggregated_output,
-            exit_code: item.exit_code ?? null,
-            status: item.status,
-          });
-        }
-
-        if (
-          "item" in event &&
-          event.item &&
-          typeof event.item === "object" &&
-          "type" in event.item &&
-          event.item.type === "file_change"
-        ) {
-          const item = event.item as FileChangeItem;
-          for (const change of item.changes) {
-            files.set(change.path, {
-              path: change.path,
-              kind: change.kind,
-            });
+        client.onServerRequest = async (request) => {
+          const approvalRequest = buildApprovalRequest(request, items);
+          if (!approvalRequest) {
+            return {};
           }
+
+          const key = `${input.sessionId}:${approvalRequest.requestId}`;
+          pendingApprovalKeys.push(key);
+          queue.push({
+            type: "approval.requested",
+            data: {
+              request_id: approvalRequest.requestId,
+              kind: approvalRequest.kind,
+              thread_id: approvalRequest.threadId,
+              turn_id: approvalRequest.turnId,
+              item_id: approvalRequest.itemId,
+              ...(approvalRequest.command ? { command: approvalRequest.command } : {}),
+              ...(approvalRequest.cwd ? { cwd: approvalRequest.cwd } : {}),
+              ...(approvalRequest.reason ? { reason: approvalRequest.reason } : {}),
+              ...(approvalRequest.changes ? { changes: approvalRequest.changes } : {}),
+              ...(approvalRequest.permissions ? { permissions: approvalRequest.permissions } : {}),
+            },
+          });
+
+          const decision = await new Promise<AppServerApprovalDecision>((resolve) => {
+            pendingApprovals.set(key, { resolve });
+          });
+          pendingApprovals.delete(key);
+          return buildApprovalResponse(approvalRequest, decision);
+        };
+
+        await client.start();
+        const threadStart = await client.startThread({
+          ...(sessionState.threadId ? { threadId: sessionState.threadId } : {}),
+          cwd: sessionState.workingDirectory,
+          ...(input.model ? { model: input.model } : {}),
+          ...(input.approvalPolicy && supportedApprovalPolicies.has(input.approvalPolicy)
+            ? { approvalPolicy: input.approvalPolicy }
+            : {}),
+          ...(input.sandboxMode && supportedSandboxModes.has(input.sandboxMode)
+            ? { sandboxMode: input.sandboxMode }
+            : {}),
+        });
+        sessionState.threadId = threadStart.threadId;
+        runtimeHint = buildRuntimeHint(
+          threadStart.runtime,
+          sessionState.workingDirectory,
+          snapshot.branch ?? null,
+        );
+
+        await client.startTurn({
+          threadId: threadStart.threadId,
+          text: input.content,
+          ...(input.model ? { model: input.model } : {}),
+          ...(input.modelReasoningEffort && supportedReasoningEfforts.has(input.modelReasoningEffort)
+            ? { reasoningEffort: input.modelReasoningEffort }
+            : {}),
+        });
+
+        for await (const event of queue) {
+          yield event;
         }
 
-        if (event.type === "turn.completed") {
-          const usage = event.usage as Usage;
-          usageTrace = {
-            input_tokens: usage.input_tokens,
-            cached_input_tokens: usage.cached_input_tokens,
-            output_tokens: usage.output_tokens,
-            reasoning_output_tokens: usage.reasoning_output_tokens,
-          };
+        if (turnFailureMessage) {
+          throw new Error(turnFailureMessage);
         }
+      } finally {
+        for (const key of pendingApprovalKeys) {
+          pendingApprovals.delete(key);
+        }
+        queue.close();
+        await client.close();
       }
 
       const summary = finalResponse.slice(0, 160);
       const turnCompletedAt = new Date();
+      const metadata = buildAgentMessageMetadata({
+        ...(sessionState.threadId ? { threadId: sessionState.threadId } : {}),
+        workingDirectory: sessionState.workingDirectory,
+        turnStartedAt,
+        turnCompletedAt,
+        snapshot,
+        fallbackCommands: [...commands.values()],
+        fallbackFiles: [...files.values()],
+        ...(usageTrace ? { usage: usageTrace } : {}),
+      });
+
+      if (runtimeHint) {
+        metadata.codex_runtime = {
+          ...(metadata.codex_runtime ?? {}),
+          ...runtimeHint,
+        } satisfies AgentMessageMetadataShape["codex_runtime"];
+      }
 
       return {
         summary,
         finalReply: finalResponse || "Codex completed with no output.",
-        metadata: buildAgentMessageMetadata({
-          workingDirectory: sessionState.workingDirectory,
-          turnStartedAt,
-          turnCompletedAt,
-          snapshot,
-          fallbackCommands: [...commands.values()],
-          fallbackFiles: [...files.values()],
-          ...(sessionState.threadId ? { threadId: sessionState.threadId } : {}),
-          ...(usageTrace ? { usage: usageTrace } : {}),
-        }),
+        metadata,
       };
+    },
+
+    async resolveApproval(input: ResolveApprovalInput) {
+      const key = `${input.sessionId}:${input.requestId}`;
+      const pending = pendingApprovals.get(key);
+      if (!pending) {
+        return false;
+      }
+
+      pendingApprovals.delete(key);
+      pending.resolve(input.decision);
+      return true;
     },
   };
 }

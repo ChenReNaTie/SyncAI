@@ -5,6 +5,8 @@ import { verifyAccessToken } from "../lib/auth.js";
 interface ClientSubscribeMessage {
   type: string;
   sessionId?: string;
+  requestId?: string;
+  decision?: string;
 }
 
 const WS_PATH = "/api/v1/ws";
@@ -29,6 +31,7 @@ export function registerWsRoute(app: FastifyInstance): void {
 
   // sessionId → Set<WebSocket>
   const subscribers = new Map<string, Set<WebSocket>>();
+  const subscriptionsBySocket = new Map<WebSocket, Set<string>>();
 
   app.server.on("upgrade", (request, socket, head) => {
     let pathname: string;
@@ -78,6 +81,49 @@ export function registerWsRoute(app: FastifyInstance): void {
         try {
           msg = JSON.parse(raw.toString()) as ClientSubscribeMessage;
         } catch {
+          return;
+        }
+
+        if (msg.type === "approval.respond") {
+          if (
+            !msg.sessionId
+            || !msg.requestId
+            || (msg.decision !== "accept" && msg.decision !== "decline")
+          ) {
+            return;
+          }
+
+          const socketSessions = subscriptionsBySocket.get(ws);
+          if (!socketSessions?.has(msg.sessionId)) {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                type: "approval.error",
+                data: {
+                  sessionId: msg.sessionId,
+                  requestId: msg.requestId,
+                  message: "Session subscription is required before responding to approvals.",
+                },
+              }));
+            }
+            return;
+          }
+
+          const resolved = await app.workspaceRuntime.resolveApproval({
+            sessionId: msg.sessionId,
+            requestId: msg.requestId,
+            decision: msg.decision,
+          });
+
+          if (!resolved && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: "approval.error",
+              data: {
+                sessionId: msg.sessionId,
+                requestId: msg.requestId,
+                message: "Approval request is no longer pending.",
+              },
+            }));
+          }
           return;
         }
 
@@ -136,6 +182,12 @@ export function registerWsRoute(app: FastifyInstance): void {
             subscribers.set(sessionId, set);
           }
           set.add(ws);
+          let socketSessions = subscriptionsBySocket.get(ws);
+          if (!socketSessions) {
+            socketSessions = new Set();
+            subscriptionsBySocket.set(ws, socketSessions);
+          }
+          socketSessions.add(sessionId);
 
           // Clean up on close
           ws.on("close", () => {
@@ -144,6 +196,13 @@ export function registerWsRoute(app: FastifyInstance): void {
               current.delete(ws);
               if (current.size === 0) {
                 subscribers.delete(sessionId);
+              }
+            }
+            const knownSessions = subscriptionsBySocket.get(ws);
+            if (knownSessions) {
+              knownSessions.delete(sessionId);
+              if (knownSessions.size === 0) {
+                subscriptionsBySocket.delete(ws);
               }
             }
           });

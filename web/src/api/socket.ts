@@ -53,14 +53,29 @@ export interface SocketStreamEvent {
   };
 }
 
+export interface SocketApprovalErrorEvent {
+  type: "approval.error";
+  data: {
+    sessionId: string;
+    requestId: string;
+    message: string;
+  };
+}
+
 export type SocketEvent =
   | SocketMessageEvent
   | SocketStatusEvent
-  | SocketStreamEvent;
+  | SocketStreamEvent
+  | SocketApprovalErrorEvent;
 
 export interface SessionSocket {
   /** Send a subscribe message for a given session. */
   subscribe(sessionId: string): void;
+  respondToApproval(
+    sessionId: string,
+    requestId: string,
+    decision: "accept" | "decline",
+  ): void;
   /** Close the connection. */
   close(): void;
 }
@@ -84,6 +99,7 @@ export function createSessionSocket(
     onMessage: (msg: Message) => void;
     onStatusChanged: (status: string) => void;
     onStreamEvent?: (event: SocketStreamEvent["data"]["event"]) => void;
+    onApprovalError?: (event: SocketApprovalErrorEvent["data"]) => void;
     onError?: (error: Event) => void;
     onClose?: (event: CloseEvent) => void;
   },
@@ -168,6 +184,10 @@ export function createSessionSocket(
         if (payload.type === "stream.event" && payload.data?.event) {
           handlers.onStreamEvent?.(payload.data.event);
         }
+
+        if (payload.type === "approval.error" && payload.data) {
+          handlers.onApprovalError?.(payload.data);
+        }
       } catch {
         // ignore non-JSON frames
       }
@@ -221,6 +241,18 @@ export function createSessionSocket(
       if (ws?.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "subscribe", sessionId }));
       }
+    },
+    respondToApproval(sessionId: string, requestId: string, decision: "accept" | "decline") {
+      if (ws?.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
+      ws.send(JSON.stringify({
+        type: "approval.respond",
+        sessionId,
+        requestId,
+        decision,
+      }));
     },
     close() {
       closed = true;
